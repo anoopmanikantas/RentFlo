@@ -72,7 +72,7 @@ export type TenantDashboard = {
     balance: string;
     status: string;
     start_date: string;
-  };
+  } | null;
   bank_accounts: Array<{ id: number; bank_name: string; account_name: string; account_number: string; ifsc: string }>;
   payments: LandlordDashboard["payments"];
   current_month: string;
@@ -145,7 +145,7 @@ export function signup(data: SignupInput) {
 }
 
 export function googleLogin(idToken: string) {
-  return request<AuthResponse>("/auth/google/", {
+  return request<AuthResponse & { is_new: boolean }>("/auth/google/", {
     method: "POST",
     body: JSON.stringify({ id_token: idToken }),
   });
@@ -177,6 +177,45 @@ export function confirmTenantPayment(token: string, payload: ConfirmPaymentInput
       method: "POST",
       body: JSON.stringify(payload),
     },
+    token,
+  );
+}
+
+export function updateRole(token: string, role: "landlord" | "tenant") {
+  return request<AuthUser>("/auth/me/", { method: "PATCH", body: JSON.stringify({ role }) }, token);
+}
+
+export function createBuilding(token: string, data: { name: string; address: string }) {
+  return request<{ id: number; name: string; address: string }>(
+    "/landlord/buildings/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function createUnit(token: string, data: { building_id: number; label: string; monthly_rent: string }) {
+  return request<{ id: number; building: number; building_name: string; label: string; monthly_rent: string }>(
+    "/landlord/units/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function createBankAccount(
+  token: string,
+  data: { bank_name: string; account_name: string; account_number: string; ifsc?: string },
+) {
+  return request<{ id: number; bank_name: string; account_name: string; account_number: string; ifsc: string }>(
+    "/landlord/bank-accounts/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function createTenancy(token: string, data: { tenant_email: string; unit_id: number }) {
+  return request<Record<string, unknown>>(
+    "/landlord/tenancies/",
+    { method: "POST", body: JSON.stringify(data) },
     token,
   );
 }

@@ -8,18 +8,23 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import BankAccount, JuspayOrder, Payment, Tenancy, Unit, User
+from .models import BankAccount, Building, JuspayOrder, Payment, Tenancy, Unit, User
 from .serializers import (
     AuthLoginSerializer,
     BankAccountSerializer,
     BuildingSerializer,
     ConfirmPaymentSerializer,
+    CreateBankAccountSerializer,
+    CreateBuildingSerializer,
+    CreateTenancySerializer,
+    CreateUnitSerializer,
     GoogleLoginSerializer,
     InitiatePaymentSerializer,
     PaymentSerializer,
     SignupSerializer,
     TenantSummarySerializer,
     UnitSerializer,
+    UpdateRoleSerializer,
     UserSerializer,
 )
 from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
@@ -72,7 +77,9 @@ class GoogleLoginView(APIView):
 
         email = google_info["email"]
         user = User.objects.filter(email=email).first()
+        is_new = False
         if not user:
+            is_new = True
             username = email.split("@")[0]
             base = username
             n = 1
@@ -90,11 +97,18 @@ class GoogleLoginView(APIView):
             user.save()
 
         token, _ = Token.objects.get_or_create(user=user)
-        return Response({"token": token.key, "user": UserSerializer(user).data})
+        return Response({"token": token.key, "user": UserSerializer(user).data, "is_new": is_new})
 
 
 class MeView(AuthenticatedAPIView):
     def get(self, request):
+        return Response(UserSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = UpdateRoleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        request.user.role = serializer.validated_data["role"]
+        request.user.save(update_fields=["role"])
         return Response(UserSerializer(request.user).data)
 
 
@@ -158,7 +172,14 @@ class TenantDashboardView(AuthenticatedAPIView):
             .first()
         )
         if not tenancy:
-            return Response({"detail": "Tenancy not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "tenancy": None,
+                "bank_accounts": [],
+                "payments": [],
+                "current_month": month,
+                "current_month_paid": "0.00",
+                "current_month_balance": "0.00",
+            })
 
         payments = (
             Payment.objects.filter(tenancy=tenancy)
@@ -328,3 +349,83 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
             payment.save(update_fields=["status", "provider_payment_id", "provider_payload", "updated_at"])
 
         return Response({"detail": "Payment status updated."})
+
+
+class CreateBuildingView(AuthenticatedAPIView):
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CreateBuildingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        building = Building.objects.create(landlord=request.user, **serializer.validated_data)
+        return Response(BuildingSerializer(building).data, status=status.HTTP_201_CREATED)
+
+
+class CreateUnitView(AuthenticatedAPIView):
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CreateUnitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        building = Building.objects.filter(
+            id=serializer.validated_data["building_id"], landlord=request.user
+        ).first()
+        if not building:
+            return Response({"detail": "Building not found"}, status=status.HTTP_404_NOT_FOUND)
+        unit = Unit.objects.create(
+            building=building,
+            label=serializer.validated_data["label"],
+            monthly_rent=serializer.validated_data["monthly_rent"],
+        )
+        return Response(UnitSerializer(unit).data, status=status.HTTP_201_CREATED)
+
+
+class CreateBankAccountView(AuthenticatedAPIView):
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CreateBankAccountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        account = BankAccount.objects.create(landlord=request.user, **serializer.validated_data)
+        return Response(BankAccountSerializer(account).data, status=status.HTTP_201_CREATED)
+
+
+class CreateTenancyView(AuthenticatedAPIView):
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CreateTenancySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tenant = User.objects.filter(
+            email=serializer.validated_data["tenant_email"], role=User.Role.TENANT
+        ).first()
+        if not tenant:
+            return Response(
+                {"detail": "No tenant account found with that email."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if Tenancy.objects.filter(tenant_user=tenant, is_active=True).exists():
+            return Response(
+                {"detail": "Tenant is already assigned to a unit."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        unit = Unit.objects.filter(
+            id=serializer.validated_data["unit_id"], building__landlord=request.user
+        ).first()
+        if not unit:
+            return Response({"detail": "Unit not found"}, status=status.HTTP_404_NOT_FOUND)
+        if Tenancy.objects.filter(unit=unit, is_active=True).exists():
+            return Response(
+                {"detail": "Unit is already occupied."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        tenancy = Tenancy.objects.create(
+            landlord=request.user,
+            tenant_user=tenant,
+            unit=unit,
+            start_date=date.today(),
+        )
+        return Response(
+            TenantSummarySerializer(tenancy, context={"rent_month": current_month()}).data,
+            status=status.HTTP_201_CREATED,
+        )

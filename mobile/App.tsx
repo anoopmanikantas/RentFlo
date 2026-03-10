@@ -16,11 +16,16 @@ import {
 import {
   ApiError,
   confirmTenantPayment,
+  createBankAccount,
+  createBuilding,
+  createTenancy,
+  createUnit,
   fetchLandlordDashboard,
   fetchTenantDashboard,
   googleLogin,
   login,
   signup,
+  updateRole,
   type AuthUser,
   type InitiatePaymentInput,
   type SignupInput,
@@ -48,6 +53,7 @@ export default function App() {
   const [signupLastName, setSignupLastName] = useState("");
   const [signupPhone, setSignupPhone] = useState("");
   const [signupRole, setSignupRole] = useState<"landlord" | "tenant">("tenant");
+  const [showRolePicker, setShowRolePicker] = useState(false);
 
   const [token, setToken] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -120,11 +126,13 @@ export default function App() {
           startTransition(() => {
             setTenantData(data);
             setLandlordData(null);
-            setPaymentForm({
-              bank_account_id: data.bank_accounts[0]?.id ?? 0,
-              rent_month: data.current_month,
-              amount: data.current_month_balance || data.tenancy.monthly_rent,
-            });
+            if (data.tenancy) {
+              setPaymentForm({
+                bank_account_id: data.bank_accounts[0]?.id ?? 0,
+                rent_month: data.current_month,
+                amount: data.current_month_balance || data.tenancy.monthly_rent,
+              });
+            }
           });
         }
       } catch (error) {
@@ -241,11 +249,21 @@ export default function App() {
         const auth = await googleLogin(idToken);
         // Clean up any leftover prompt container
         document.getElementById("g_id_signin_tmp")?.remove();
-        startTransition(() => {
-          setToken(auth.token);
-          setUser(auth.user);
-        });
-        setMessage(`Signed in with Google as ${auth.user.role}.`);
+        if (auth.is_new) {
+          // New user – save token & user, then show role picker
+          startTransition(() => {
+            setToken(auth.token);
+            setUser(auth.user);
+            setShowRolePicker(true);
+          });
+          setMessage("Welcome! Choose your role to get started.");
+        } else {
+          startTransition(() => {
+            setToken(auth.token);
+            setUser(auth.user);
+          });
+          setMessage(`Signed in with Google as ${auth.user.role}.`);
+        }
       } else {
         setMessage("Google Sign-In on native requires Expo AuthSession setup. Use web for now.");
       }
@@ -272,8 +290,26 @@ export default function App() {
     setSignupPhone("");
     setSignupRole("tenant");
     setAuthScreen("login");
+    setShowRolePicker(false);
     setPaymentForm(initialPaymentForm);
     setMessage("Signed out.");
+  }
+
+  async function handleRoleSelect(role: "landlord" | "tenant") {
+    setBusy(true);
+    setMessage(`Setting role to ${role}...`);
+    try {
+      const updatedUser = await updateRole(token, role);
+      startTransition(() => {
+        setUser(updatedUser);
+        setShowRolePicker(false);
+      });
+      setMessage(`You're now a ${role}. Loading your dashboard...`);
+    } catch (error) {
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleTenantPayment() {
@@ -302,11 +338,13 @@ export default function App() {
 
       const refreshed = await fetchTenantDashboard(token);
       setTenantData(refreshed);
-      setPaymentForm({
-        bank_account_id: refreshed.bank_accounts[0]?.id ?? 0,
-        rent_month: refreshed.current_month,
-        amount: refreshed.current_month_balance || refreshed.tenancy.monthly_rent,
-      });
+      if (refreshed.tenancy) {
+        setPaymentForm({
+          bank_account_id: refreshed.bank_accounts[0]?.id ?? 0,
+          rent_month: refreshed.current_month,
+          amount: refreshed.current_month_balance || refreshed.tenancy.monthly_rent,
+        });
+      }
       setMessage(
         result.mode === "mock"
           ? "Mock payment completed. Set RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET for live UPI/card checkout."
@@ -328,7 +366,7 @@ export default function App() {
             <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
             <Text style={styles.title}>RentFlow</Text>
             <Text style={styles.subtitle}>
-              One React Native app for iOS, Android, and web, backed by Django and ready for Juspay checkout.
+              One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
             </Text>
             <Text style={styles.note}>
               API base URL: {Platform.OS === "web" ? "http://localhost:8000/api" : "Set EXPO_PUBLIC_API_URL"}
@@ -423,22 +461,53 @@ export default function App() {
           <Text style={styles.bannerText}>{message}</Text>
         </View>
 
-        {user?.role === "landlord" && landlordData ? <LandlordView data={landlordData} /> : null}
+        {user?.role === "landlord" && landlordData ? <LandlordView data={landlordData} token={token} onRefresh={async () => {
+          const data = await fetchLandlordDashboard(token);
+          setLandlordData(data);
+        }} /> : null}
         {user?.role === "tenant" && tenantData ? (
-          <TenantView
-            data={tenantData}
-            paymentForm={paymentForm}
-            setPaymentForm={setPaymentForm}
-            onSubmit={handleTenantPayment}
-            busy={busy}
-          />
+          tenantData.tenancy ? (
+            <TenantView
+              data={tenantData as TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> }}
+              paymentForm={paymentForm}
+              setPaymentForm={setPaymentForm}
+              onSubmit={handleTenantPayment}
+              busy={busy}
+            />
+          ) : (
+            <TenantWelcome user={user} />
+          )
+        ) : null}
+
+        {showRolePicker && user ? (
+          <RolePicker onSelect={handleRoleSelect} busy={busy} />
         ) : null}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function LandlordView({ data }: { data: LandlordDashboard }) {
+function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
+  const [showAddBuilding, setShowAddBuilding] = useState(false);
+  const [showAddUnit, setShowAddUnit] = useState(false);
+  const [showAddBank, setShowAddBank] = useState(false);
+  const [showAddTenancy, setShowAddTenancy] = useState(false);
+  const [formBusy, setFormBusy] = useState(false);
+  const [formMsg, setFormMsg] = useState("");
+
+  // Form states
+  const [bName, setBName] = useState("");
+  const [bAddress, setBAddress] = useState("");
+  const [uBuildingId, setUBuildingId] = useState("");
+  const [uLabel, setULabel] = useState("");
+  const [uRent, setURent] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [accName, setAccName] = useState("");
+  const [accNumber, setAccNumber] = useState("");
+  const [ifsc, setIfsc] = useState("");
+  const [tenantEmail, setTenantEmail] = useState("");
+  const [tenantUnitId, setTenantUnitId] = useState("");
+
   return (
     <View style={styles.stack}>
       <View style={styles.summaryGrid}>
@@ -448,11 +517,107 @@ function LandlordView({ data }: { data: LandlordDashboard }) {
         <SummaryCard label="Outstanding" value={money(data.summary.monthly_outstanding)} note={`${money(data.summary.monthly_collected)} collected`} />
       </View>
 
+      {/* Quick-add actions */}
+      <View style={styles.panel}>
+        <Text style={styles.sectionKicker}>Manage</Text>
+        <Text style={styles.panelTitle}>Add properties & tenants</Text>
+        {formMsg ? <Text style={styles.helper}>{formMsg}</Text> : null}
+
+        <View style={{ gap: 8 }}>
+          <PrimaryButton label={showAddBuilding ? "Cancel" : "+ Add building"} onPress={() => { setShowAddBuilding(!showAddBuilding); setFormMsg(""); }} variant={showAddBuilding ? "secondary" : "primary"} />
+          {showAddBuilding && (
+            <View style={styles.formGrid}>
+              <Field label="Building name" value={bName} onChangeText={setBName} />
+              <Field label="Address" value={bAddress} onChangeText={setBAddress} />
+              <PrimaryButton label={formBusy ? "Creating..." : "Create building"} disabled={formBusy} onPress={async () => {
+                setFormBusy(true);
+                try {
+                  await createBuilding(token, { name: bName, address: bAddress });
+                  setFormMsg(`Building "${bName}" created!`);
+                  setBName(""); setBAddress(""); setShowAddBuilding(false);
+                  onRefresh();
+                } catch (e) { setFormMsg(readError(e)); }
+                setFormBusy(false);
+              }} />
+            </View>
+          )}
+
+          <PrimaryButton label={showAddUnit ? "Cancel" : "+ Add unit"} onPress={() => { setShowAddUnit(!showAddUnit); setFormMsg(""); }} variant={showAddUnit ? "secondary" : "primary"} />
+          {showAddUnit && (
+            <View style={styles.formGrid}>
+              <Text style={styles.helper}>
+                Buildings: {data.buildings.map((b) => `${b.id}: ${b.name}`).join(" • ")}
+              </Text>
+              <Field label="Building ID" value={uBuildingId} onChangeText={setUBuildingId} keyboardType="numeric" />
+              <Field label="Unit label (e.g. 2B)" value={uLabel} onChangeText={setULabel} />
+              <Field label="Monthly rent" value={uRent} onChangeText={setURent} keyboardType="numeric" />
+              <PrimaryButton label={formBusy ? "Creating..." : "Create unit"} disabled={formBusy} onPress={async () => {
+                setFormBusy(true);
+                try {
+                  await createUnit(token, { building_id: Number(uBuildingId), label: uLabel, monthly_rent: uRent });
+                  setFormMsg(`Unit "${uLabel}" created!`);
+                  setUBuildingId(""); setULabel(""); setURent(""); setShowAddUnit(false);
+                  onRefresh();
+                } catch (e) { setFormMsg(readError(e)); }
+                setFormBusy(false);
+              }} />
+            </View>
+          )}
+
+          <PrimaryButton label={showAddBank ? "Cancel" : "+ Add bank account"} onPress={() => { setShowAddBank(!showAddBank); setFormMsg(""); }} variant={showAddBank ? "secondary" : "primary"} />
+          {showAddBank && (
+            <View style={styles.formGrid}>
+              <Field label="Bank name" value={bankName} onChangeText={setBankName} />
+              <Field label="Account name" value={accName} onChangeText={setAccName} />
+              <Field label="Account number" value={accNumber} onChangeText={setAccNumber} />
+              <Field label="IFSC" value={ifsc} onChangeText={setIfsc} />
+              <PrimaryButton label={formBusy ? "Creating..." : "Create bank account"} disabled={formBusy} onPress={async () => {
+                setFormBusy(true);
+                try {
+                  await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
+                  setFormMsg(`Bank account "${bankName}" added!`);
+                  setBankName(""); setAccName(""); setAccNumber(""); setIfsc(""); setShowAddBank(false);
+                  onRefresh();
+                } catch (e) { setFormMsg(readError(e)); }
+                setFormBusy(false);
+              }} />
+            </View>
+          )}
+
+          <PrimaryButton label={showAddTenancy ? "Cancel" : "+ Assign tenant"} onPress={() => { setShowAddTenancy(!showAddTenancy); setFormMsg(""); }} variant={showAddTenancy ? "secondary" : "primary"} />
+          {showAddTenancy && (
+            <View style={styles.formGrid}>
+              <Text style={styles.helper}>
+                The tenant must have signed up first. Enter their email and choose a unit.
+              </Text>
+              <Text style={styles.helper}>
+                Available units: {data.units.map((u) => `${u.id}: ${u.building_name} / ${u.label}`).join(" • ")}
+              </Text>
+              <Field label="Tenant email" value={tenantEmail} onChangeText={setTenantEmail} />
+              <Field label="Unit ID" value={tenantUnitId} onChangeText={setTenantUnitId} keyboardType="numeric" />
+              <PrimaryButton label={formBusy ? "Assigning..." : "Assign tenant to unit"} disabled={formBusy} onPress={async () => {
+                setFormBusy(true);
+                try {
+                  await createTenancy(token, { tenant_email: tenantEmail, unit_id: Number(tenantUnitId) });
+                  setFormMsg(`Tenant assigned!`);
+                  setTenantEmail(""); setTenantUnitId(""); setShowAddTenancy(false);
+                  onRefresh();
+                } catch (e) { setFormMsg(readError(e)); }
+                setFormBusy(false);
+              }} />
+            </View>
+          )}
+        </View>
+      </View>
+
       <View style={styles.panel}>
         <Text style={styles.sectionKicker}>Owner View</Text>
         <Text style={styles.panelTitle}>Tenant payment status</Text>
-        <View style={styles.tableLike}>
-          {data.tenants.map((tenant) => (
+        {data.tenants.length === 0 ? (
+          <Text style={styles.helper}>No tenants yet. Add a building, a unit, and assign a tenant above.</Text>
+        ) : (
+          <View style={styles.tableLike}>
+            {data.tenants.map((tenant) => (
             <View key={tenant.id} style={styles.tableRow}>
               <View style={styles.tableMain}>
                 <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
@@ -468,6 +633,7 @@ function LandlordView({ data }: { data: LandlordDashboard }) {
             </View>
           ))}
         </View>
+        )}
       </View>
 
       <View style={styles.panel}>
@@ -502,7 +668,7 @@ function TenantView({
   onSubmit,
   busy,
 }: {
-  data: TenantDashboard;
+  data: TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> };
   paymentForm: InitiatePaymentInput;
   setPaymentForm: (value: InitiatePaymentInput) => void;
   onSubmit: () => void;
@@ -518,7 +684,7 @@ function TenantView({
       </View>
 
       <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>Juspay</Text>
+        <Text style={styles.sectionKicker}>Razorpay</Text>
         <Text style={styles.panelTitle}>Pay rent inside the app</Text>
         <View style={styles.formGrid}>
           <Field
@@ -542,12 +708,15 @@ function TenantView({
         <Text style={styles.helper}>
           Available accounts: {data.bank_accounts.map((account) => `${account.id}: ${account.bank_name}`).join(" • ")}
         </Text>
-        <PrimaryButton label={busy ? "Processing..." : "Pay with Juspay"} onPress={onSubmit} disabled={busy} />
+        <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} />
       </View>
 
       <View style={styles.panel}>
         <Text style={styles.sectionKicker}>History</Text>
         <Text style={styles.panelTitle}>Your payments</Text>
+        {data.payments.length === 0 ? (
+          <Text style={styles.helper}>No payments yet.</Text>
+        ) : (
         <View style={styles.tableLike}>
           {data.payments.map((payment) => (
             <View key={payment.id} style={styles.tableRow}>
@@ -565,6 +734,63 @@ function TenantView({
             </View>
           ))}
         </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant") => void; busy: boolean }) {
+  return (
+    <View style={styles.panel}>
+      <Text style={styles.sectionKicker}>Welcome</Text>
+      <Text style={styles.panelTitle}>How will you use RentFlow?</Text>
+      <Text style={styles.helper}>
+        Choose your role. You can change this later from your profile.
+      </Text>
+      <View style={{ gap: 10, marginTop: 4 }}>
+        <Pressable
+          style={[styles.roleOption, { paddingVertical: 18, paddingHorizontal: 16, borderRadius: 18 }]}
+          onPress={() => onSelect("landlord")}
+          disabled={busy}
+        >
+          <Text style={[styles.rowTitle, { textAlign: "center" }]}>I'm a Landlord</Text>
+          <Text style={[styles.helper, { textAlign: "center", marginTop: 4 }]}>
+            Manage buildings, units, and collect rent from tenants.
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.roleOption, { paddingVertical: 18, paddingHorizontal: 16, borderRadius: 18 }]}
+          onPress={() => onSelect("tenant")}
+          disabled={busy}
+        >
+          <Text style={[styles.rowTitle, { textAlign: "center" }]}>I'm a Tenant</Text>
+          <Text style={[styles.helper, { textAlign: "center", marginTop: 4 }]}>
+            View your rent details and pay online via UPI or card.
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function TenantWelcome({ user }: { user: AuthUser }) {
+  return (
+    <View style={styles.panel}>
+      <Text style={styles.sectionKicker}>Almost there</Text>
+      <Text style={styles.panelTitle}>Welcome, {user.first_name || user.username}!</Text>
+      <Text style={styles.helper}>
+        Your account is set up, but your landlord hasn't assigned you to a unit yet.
+      </Text>
+      <Text style={styles.helper}>
+        Share your email ({user.email}) with your landlord so they can link you to your apartment.
+        Once they do, you'll see your rent details and payment options here.
+      </Text>
+      <View style={styles.summaryCard}>
+        <Text style={styles.summaryLabel}>What to do</Text>
+        <Text style={[styles.helper, { marginTop: 8 }]}>1. Ask your landlord to add you on RentFlow</Text>
+        <Text style={styles.helper}>2. They'll enter your email and assign a unit</Text>
+        <Text style={styles.helper}>3. Refresh this page to see your dashboard</Text>
       </View>
     </View>
   );

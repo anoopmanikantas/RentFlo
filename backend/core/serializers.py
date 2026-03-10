@@ -55,6 +55,7 @@ class SignupSerializer(serializers.Serializer):
 
 class GoogleLoginSerializer(serializers.Serializer):
     id_token = serializers.CharField()
+    role = serializers.ChoiceField(choices=User.Role.choices, required=False)
 
 
 class AuthResponseSerializer(serializers.Serializer):
@@ -196,4 +197,31 @@ class ConfirmPaymentSerializer(serializers.Serializer):
     provider_payment_id = serializers.CharField(required=False, allow_blank=True)
     razorpay_signature = serializers.CharField(required=False, allow_blank=True)
     provider_payload = serializers.JSONField(required=False)
+
+
+class UpdateRoleSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=User.Role.choices)
+
+
+class CreateBuildingSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=120)
+    address = serializers.CharField()
+
+
+class CreateUnitSerializer(serializers.Serializer):
+    building_id = serializers.IntegerField()
+    label = serializers.CharField(max_length=80)
+    monthly_rent = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class CreateBankAccountSerializer(serializers.Serializer):
+    bank_name = serializers.CharField(max_length=120)
+    account_name = serializers.CharField(max_length=120)
+    account_number = serializers.CharField(max_length=64)
+    ifsc = serializers.CharField(max_length=32, required=False, default="")
+
+
+class CreateTenancySerializer(serializers.Serializer):
+    tenant_email = serializers.EmailField()
+    unit_id = serializers.IntegerField()
 
