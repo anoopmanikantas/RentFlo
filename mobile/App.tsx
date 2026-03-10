@@ -43,6 +43,19 @@ import {
   initiateTenantPayment,
   type LandlordDashboard,
   type TenantDashboard,
+  // Subscription & billing
+  fetchSubscription,
+  upgradeSubscription,
+  confirmUpgrade,
+  activateAddOn,
+  confirmAddOn,
+  fetchAnalytics,
+  exportPayments,
+  type SubscriptionResponse,
+  type SubscriptionInfo,
+  type Plan,
+  type AddOnCatalogItem,
+  type AnalyticsData,
 } from "./src/api";
 import { launchRazorpayPayment } from "./src/razorpay";
 
@@ -649,6 +662,153 @@ function makeStyles(t: Theme) {
       fontWeight: "700",
       color: t.accent,
     },
+    // Subscription & Plans styles
+    planCard: {
+      padding: 20,
+      borderRadius: 20,
+      backgroundColor: t.card,
+      borderWidth: 2,
+      borderColor: t.border,
+      gap: 10,
+      ...webTransition,
+    },
+    planCardActive: {
+      borderColor: t.primary,
+      backgroundColor: t.primaryMuted,
+    },
+    planName: {
+      fontSize: 22,
+      fontWeight: "900",
+      color: t.text,
+    },
+    planPrice: {
+      fontSize: 28,
+      fontWeight: "900",
+      color: t.accent,
+    },
+    planPriceSuffix: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: t.textSecondary,
+    },
+    planFeature: {
+      fontSize: 13,
+      color: t.textSecondary,
+      lineHeight: 20,
+    },
+    planLimit: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: t.text,
+    },
+    usageBar: {
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: t.border,
+      overflow: "hidden" as const,
+      ...webTransition,
+    },
+    usageBarFill: {
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: t.primary,
+      ...webTransition,
+    },
+    tierBadge: {
+      alignSelf: "flex-start" as const,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 8,
+      backgroundColor: t.primaryMuted,
+    },
+    tierBadgeText: {
+      fontSize: 11,
+      fontWeight: "800",
+      color: t.accent,
+      textTransform: "uppercase" as const,
+      letterSpacing: 1,
+    },
+    addonCard: {
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      gap: 12,
+      padding: 16,
+      borderRadius: 16,
+      backgroundColor: t.card,
+      borderWidth: 1,
+      borderColor: t.border,
+      ...webTransition,
+    },
+    addonInfo: {
+      flex: 1,
+      gap: 2,
+    },
+    addonName: {
+      fontSize: 15,
+      fontWeight: "700",
+      color: t.text,
+    },
+    addonPrice: {
+      fontSize: 13,
+      color: t.textSecondary,
+    },
+    lockedOverlay: {
+      padding: 24,
+      borderRadius: 20,
+      backgroundColor: t.surface,
+      borderWidth: 1,
+      borderColor: t.border,
+      alignItems: "center" as const,
+      gap: 12,
+      ...webGlass,
+      ...webTransition,
+    },
+    lockedIcon: {
+      fontSize: 36,
+    },
+    lockedText: {
+      fontSize: 15,
+      color: t.textSecondary,
+      textAlign: "center" as const,
+    },
+    analyticsValue: {
+      fontSize: 32,
+      fontWeight: "900",
+      color: t.text,
+    },
+    analyticsLabel: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: t.accent,
+      textTransform: "uppercase" as const,
+      letterSpacing: 0.5,
+      marginBottom: 6,
+    },
+    barChartRow: {
+      flexDirection: "row" as const,
+      alignItems: "flex-end" as const,
+      gap: 8,
+      height: 120,
+    },
+    barChartBar: {
+      flex: 1,
+      borderRadius: 6,
+      backgroundColor: t.primary,
+      minHeight: 4,
+      ...webTransition,
+    },
+    barChartLabel: {
+      fontSize: 10,
+      color: t.textSecondary,
+      textAlign: "center" as const,
+      marginTop: 4,
+    },
+    navChips: {
+      flexDirection: "row" as const,
+      flexWrap: "wrap" as const,
+      gap: 8,
+      marginBottom: 4,
+    },
   });
 }
 
@@ -1177,9 +1337,12 @@ function ThemeToggle() {
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
   const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
+  type ScreenType = "dashboard" | "plans" | "analytics";
   const [activeForm, setActiveForm] = useState<FormType>(null);
+  const [screen, setScreen] = useState<ScreenType>("dashboard");
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
+  const [exportBusy, setExportBusy] = useState(false);
 
   const [bName, setBName] = useState("");
   const [bAddress, setBAddress] = useState("");
@@ -1193,17 +1356,84 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   const [tenantIdentifier, setTenantIdentifier] = useState("");
   const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
 
+  // Subscription data from dashboard payload
+  const sub = (data as any).subscription as SubscriptionInfo | undefined;
+
   function openForm(form: FormType) {
     setActiveForm(activeForm === form ? null : form);
     setFormMsg("");
+  }
+
+  async function handleExportPayments() {
+    setExportBusy(true);
+    try {
+      const csv = await exportPayments(token, { format: "csv" });
+      // In a real app, this would save to device file system or share
+      // For now, just log success
+      console.log("CSV export:", csv.slice(0, 100) + "...");
+      setFormMsg("✓ Payment report exported successfully");
+      setTimeout(() => setFormMsg(""), 3000);
+    } catch (e) {
+      setFormMsg(readError(e));
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   const unoccupiedUnits = data.units.filter(
     (u) => !data.tenants.some((tt) => tt.unit_label === u.label && tt.building_name === u.building_name),
   );
 
+  const isUpgradePrompt = formMsg.includes("Upgrade");
+
+  if (screen === "plans") {
+    return <PlansScreen token={token} onBack={() => setScreen("dashboard")} onRefresh={onRefresh} />;
+  }
+  if (screen === "analytics") {
+    return <AnalyticsScreen token={token} onBack={() => setScreen("dashboard")} />;
+  }
+
   return (
     <View style={styles.stack}>
+      {/* Navigation chips */}
+      <View style={styles.navChips}>
+        <ActionChip icon="📊" label="Dashboard" active={true} onPress={() => {}} />
+        <ActionChip icon="💎" label="Plans" active={false} onPress={() => setScreen("plans")} />
+        <ActionChip icon="📈" label="Analytics" active={false} onPress={() => setScreen("analytics")} />
+      </View>
+
+      {/* Subscription tier badge + usage */}
+      {sub && (
+        <View style={[styles.panel, { gap: 12 }]}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <View style={styles.tierBadge}>
+              <Text style={styles.tierBadgeText}>{sub.tier} plan</Text>
+            </View>
+            {sub.tier === "free" && (
+              <Pressable onPress={() => setScreen("plans")}>
+                <Text style={{ color: t.accent, fontWeight: "700", fontSize: 13 }}>Upgrade →</Text>
+              </Pressable>
+            )}
+          </View>
+          <View style={{ gap: 6 }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+              <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Units</Text>
+              <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.units_used}/{sub.max_units >= 9999 ? "∞" : sub.max_units}</Text>
+            </View>
+            <View style={styles.usageBar}>
+              <View style={[styles.usageBarFill, { width: `${Math.min((sub.units_used / (sub.max_units >= 9999 ? 100 : sub.max_units)) * 100, 100)}%` }]} />
+            </View>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
+              <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Tenants</Text>
+              <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.tenants_used}/{sub.max_tenants >= 9999 ? "∞" : sub.max_tenants}</Text>
+            </View>
+            <View style={styles.usageBar}>
+              <View style={[styles.usageBarFill, { width: `${Math.min((sub.tenants_used / (sub.max_tenants >= 9999 ? 100 : sub.max_tenants)) * 100, 100)}%` }]} />
+            </View>
+          </View>
+        </View>
+      )}
+
       <View style={styles.summaryGrid}>
         <SummaryCard label="Buildings" value={String(data.summary.building_count)} note={`${data.summary.unit_count} units`} />
         <SummaryCard label="Tenants" value={String(data.summary.tenant_count)} note="Active occupancies" />
@@ -1216,8 +1446,16 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         <Text style={styles.sectionKicker}>Manage</Text>
         <Text style={styles.panelTitle}>Quick actions</Text>
         {formMsg ? (
-          <View style={[styles.banner, { marginBottom: 2 }]}>
-            <Text style={styles.bannerText}>{formMsg}</Text>
+          <View style={[styles.banner, { marginBottom: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
+            <Text style={[styles.bannerText, { flex: 1 }]}>{formMsg}</Text>
+            {isUpgradePrompt && (
+              <Pressable
+                style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: t.accent, borderRadius: 4 }}
+                onPress={() => setScreen("plans")}
+              >
+                <Text style={{ color: t.background, fontWeight: "700", fontSize: 12 }}>View Plans</Text>
+              </Pressable>
+            )}
           </View>
         ) : null}
 
@@ -1281,7 +1519,14 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                   setFormMsg(`✓ Unit "${uLabel}" created`);
                   setSelectedBuildingId(null); setULabel(""); setURent(""); setActiveForm(null);
                   onRefresh();
-                } catch (e) { setFormMsg(readError(e)); }
+                } catch (e) {
+                  const err = readError(e);
+                  if (err.includes("Upgrade")) {
+                    setFormMsg(err);
+                  } else {
+                    setFormMsg(err);
+                  }
+                }
                 setFormBusy(false);
               }}
             />
@@ -1355,7 +1600,14 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                     setFormMsg(`✓ Tenant assigned successfully`);
                     setTenantIdentifier(""); setSelectedUnitId(null); setActiveForm(null);
                     onRefresh();
-                  } catch (e) { setFormMsg(readError(e)); }
+                  } catch (e) {
+                    const err = readError(e);
+                    if (err.includes("Upgrade")) {
+                      setFormMsg(err);
+                    } else {
+                      setFormMsg(err);
+                    }
+                  }
                   setFormBusy(false);
                 }}
               />
@@ -1403,7 +1655,20 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
 
       <View style={styles.panel}>
         <Text style={styles.sectionKicker}>Ledger</Text>
-        <Text style={styles.panelTitle}>Recent payments</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <Text style={styles.panelTitle}>Recent payments</Text>
+          {sub?.has_reports && (
+            <Pressable
+              style={{ padding: 8, backgroundColor: t.accent, borderRadius: 4 }}
+              onPress={handleExportPayments}
+              disabled={exportBusy}
+            >
+              <Text style={{ color: t.background, fontWeight: "700", fontSize: 12 }}>
+                {exportBusy ? "Exporting..." : "📥 Export"}
+              </Text>
+            </Pressable>
+          )}
+        </View>
         <View style={styles.tableLike}>
           {data.payments.map((payment) => (
             <View key={payment.id} style={styles.tableRow}>
@@ -1505,6 +1770,348 @@ function TenantView({
           </View>
         )}
       </View>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Plans & Billing screen
+// ---------------------------------------------------------------------------
+
+function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () => void; onRefresh: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [subData, setSubData] = useState<SubscriptionResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchSubscription(token)
+      .then(setSubData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  async function handleUpgrade(tier: "pro" | "business") {
+    setBusy(true);
+    setMsg(`Upgrading to ${tier}...`);
+    try {
+      const checkout = await upgradeSubscription(token, tier);
+      if (checkout.mode === "mock") {
+        await confirmUpgrade(token, tier);
+        setMsg(`✓ Upgraded to ${tier.charAt(0).toUpperCase() + tier.slice(1)}!`);
+        const refreshed = await fetchSubscription(token);
+        setSubData(refreshed);
+        onRefresh();
+      } else {
+        const result = await launchRazorpayPayment(checkout as any);
+        if (result.status === "succeeded") {
+          await confirmUpgrade(token, tier, result.providerPaymentId);
+          setMsg(`✓ Upgraded to ${tier.charAt(0).toUpperCase() + tier.slice(1)}!`);
+          const refreshed = await fetchSubscription(token);
+          setSubData(refreshed);
+          onRefresh();
+        } else {
+          setMsg("Payment cancelled or failed.");
+        }
+      }
+    } catch (e) {
+      setMsg(readError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleActivateAddOn(feature: string) {
+    setBusy(true);
+    setMsg(`Activating ${feature}...`);
+    try {
+      const checkout = await activateAddOn(token, feature);
+      if (checkout.mode === "mock") {
+        await confirmAddOn(token, feature);
+        setMsg(`✓ ${feature.replace("_", " ")} activated!`);
+        const refreshed = await fetchSubscription(token);
+        setSubData(refreshed);
+        onRefresh();
+      } else {
+        const result = await launchRazorpayPayment(checkout as any);
+        if (result.status === "succeeded") {
+          await confirmAddOn(token, feature, result.providerPaymentId);
+          setMsg(`✓ ${feature.replace("_", " ")} activated!`);
+          const refreshed = await fetchSubscription(token);
+          setSubData(refreshed);
+          onRefresh();
+        } else {
+          setMsg("Payment cancelled or failed.");
+        }
+      }
+    } catch (e) {
+      setMsg(readError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+        <ActivityIndicator color={t.accent} size="large" />
+        <Text style={[styles.helper, { marginTop: 12 }]}>Loading plans...</Text>
+      </View>
+    );
+  }
+
+  const sub = subData?.subscription;
+  const plans = subData?.plans || [];
+  const addonsCatalog = subData?.addons_catalog || [];
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Dashboard" active={false} onPress={onBack} />
+        <ActionChip icon="💎" label="Plans" active={true} onPress={() => {}} />
+      </View>
+
+      <View style={styles.panel}>
+        <Text style={styles.sectionKicker}>Subscription</Text>
+        <Text style={styles.panelTitle}>Plans & Billing</Text>
+        {msg ? (
+          <View style={[styles.banner, { marginBottom: 4 }]}>
+            <Text style={styles.bannerText}>{msg}</Text>
+          </View>
+        ) : null}
+
+        <View style={{ gap: 14 }}>
+          {plans.map((plan) => {
+            const isCurrent = sub?.tier === plan.tier;
+            const isUpgrade =
+              ({ free: 0, pro: 1, business: 2 }[plan.tier] ?? 0) >
+              ({ free: 0, pro: 1, business: 2 }[sub?.tier ?? "free"] ?? 0);
+            return (
+              <View key={plan.tier} style={[styles.planCard, isCurrent && styles.planCardActive]}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={styles.planName}>{plan.name}</Text>
+                  {isCurrent && (
+                    <View style={styles.tierBadge}>
+                      <Text style={styles.tierBadgeText}>Current</Text>
+                    </View>
+                  )}
+                </View>
+                <View style={{ flexDirection: "row", alignItems: "baseline", gap: 4 }}>
+                  <Text style={styles.planPrice}>
+                    {plan.price_monthly === 0 ? "Free" : `₹${plan.price_monthly}`}
+                  </Text>
+                  {plan.price_monthly > 0 && <Text style={styles.planPriceSuffix}>/month</Text>}
+                </View>
+                <Text style={styles.planLimit}>
+                  {plan.max_units >= 9999 ? "Unlimited" : `Up to ${plan.max_units}`} units • {plan.max_tenants >= 9999 ? "Unlimited" : `Up to ${plan.max_tenants}`} tenants
+                </Text>
+                {plan.features.length > 0 && (
+                  <View style={{ gap: 2 }}>
+                    {plan.features.map((f) => (
+                      <Text key={f} style={styles.planFeature}>✓ {f}</Text>
+                    ))}
+                  </View>
+                )}
+                {isUpgrade && (
+                  <PrimaryButton
+                    label={busy ? "Processing..." : `Upgrade to ${plan.name}`}
+                    onPress={() => handleUpgrade(plan.tier as "pro" | "business")}
+                    disabled={busy}
+                    fullWidth
+                  />
+                )}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Add-ons section */}
+      <View style={styles.panel}>
+        <Text style={styles.sectionKicker}>Add-ons</Text>
+        <Text style={styles.panelTitle}>Premium tools</Text>
+        <Text style={styles.helper}>Purchase individual tools to enhance your experience.</Text>
+        <View style={{ gap: 10-2 }}>
+          {addonsCatalog.map((addon) => {
+            const active = addon.is_active || addon.included_in_tier;
+            return (
+              <View key={addon.feature} style={styles.addonCard}>
+                <Text style={{ fontSize: 24 }}>{addon.feature === "analytics" ? "📈" : "📥"}</Text>
+                <View style={styles.addonInfo}>
+                  <Text style={styles.addonName}>{addon.name}</Text>
+                  <Text style={styles.addonPrice}>
+                    {addon.included_in_tier
+                      ? "Included in your plan"
+                      : active
+                        ? "Active"
+                        : `₹${addon.price_monthly}/month`}
+                  </Text>
+                </View>
+                {!active && (
+                  <PrimaryButton
+                    label={busy ? "..." : "Activate"}
+                    onPress={() => handleActivateAddOn(addon.feature)}
+                    disabled={busy}
+                  />
+                )}
+                {active && (
+                  <View style={[styles.badge, styles.goodBadge]}>
+                    <Text style={styles.badgeText}>Active</Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Analytics screen (premium)
+// ---------------------------------------------------------------------------
+
+function AnalyticsScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchAnalytics(token)
+      .then((data) => {
+        setAnalyticsData(data);
+        setLocked(false);
+      })
+      .catch((e) => {
+        const err = readError(e);
+        if (err.includes("Analytics requires") || err.includes("add-on")) {
+          setLocked(true);
+        } else {
+          setMsg(err);
+        }
+      })
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Dashboard" active={false} onPress={onBack} />
+        <ActionChip icon="📈" label="Analytics" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : locked ? (
+        <View style={styles.lockedOverlay}>
+          <Text style={styles.lockedIcon}>🔒</Text>
+          <Text style={[styles.panelTitle, { textAlign: "center" }]}>Analytics Dashboard</Text>
+          <Text style={styles.lockedText}>
+            The analytics dashboard requires the Pro plan or the Analytics add-on.
+          </Text>
+          <PrimaryButton label="View Plans" onPress={onBack} />
+        </View>
+      ) : analyticsData ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Insights</Text>
+            <Text style={styles.panelTitle}>Analytics Dashboard</Text>
+            {msg ? <Text style={styles.helper}>{msg}</Text> : null}
+          </View>
+
+          {/* Key metrics */}
+          <View style={styles.summaryGrid}>
+            <SummaryCard
+              label="Occupancy rate"
+              value={`${analyticsData.occupancy_rate}%`}
+              note={`${analyticsData.occupied_units}/${analyticsData.total_units} units`}
+            />
+            <SummaryCard
+              label="Collection rate"
+              value={`${analyticsData.collection_rate}%`}
+              note={`${analyticsData.current_month}`}
+            />
+            <SummaryCard
+              label="Monthly due"
+              value={money(analyticsData.monthly_due)}
+              note={analyticsData.current_month}
+            />
+            <SummaryCard
+              label="Collected"
+              value={money(analyticsData.monthly_collected)}
+              note={analyticsData.current_month}
+            />
+          </View>
+
+          {/* Revenue trend bar chart */}
+          <View style={styles.panel}>
+            <Text style={styles.analyticsLabel}>Revenue trend (last 6 months)</Text>
+            {(() => {
+              const maxVal = Math.max(
+                ...analyticsData.revenue_trend.map((r) => Number(r.collected)),
+                1,
+              );
+              return (
+                <>
+                  <View style={styles.barChartRow}>
+                    {analyticsData.revenue_trend.map((r) => {
+                      const pct = (Number(r.collected) / maxVal) * 100;
+                      return (
+                        <View key={r.month} style={{ flex: 1, alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                          <View
+                            style={[
+                              styles.barChartBar,
+                              { height: `${Math.max(pct, 3)}%`, flex: 0, width: "100%" },
+                            ]}
+                          />
+                        </View>
+                      );
+                    })}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    {analyticsData.revenue_trend.map((r) => (
+                      <View key={r.month} style={{ flex: 1, alignItems: "center" }}>
+                        <Text style={styles.barChartLabel}>{r.month.slice(5)}</Text>
+                        <Text style={[styles.barChartLabel, { fontWeight: "700", color: t.text }]}>
+                          {money(r.collected)}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                </>
+              );
+            })()}
+          </View>
+
+          {/* Top paying tenants */}
+          <View style={styles.panel}>
+            <Text style={styles.analyticsLabel}>Top tenants by payment</Text>
+            <View style={styles.tableLike}>
+              {analyticsData.top_tenants.map((tenant, i) => (
+                <View key={i} style={styles.tableRow}>
+                  <View style={styles.tableMain}>
+                    <Text style={styles.rowTitle}>{tenant.name}</Text>
+                  </View>
+                  <View style={styles.tableNumbers}>
+                    <Text style={styles.rowValue}>{money(tenant.total_paid)}</Text>
+                    <Text style={styles.rowMeta}>total paid</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        </>
+      ) : (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg || "Unable to load analytics."}</Text>
+        </View>
+      )}
     </View>
   );
 }

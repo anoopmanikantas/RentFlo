@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
-from core.models import BankAccount, Building, Payment, Tenancy, Unit
+from core.models import AddOn, BankAccount, Building, Payment, Subscription, Tenancy, Unit
 
 
 class Command(BaseCommand):
@@ -23,6 +23,14 @@ class Command(BaseCommand):
             last_name="Subramani",
             role=User.Role.LANDLORD,
             phone="+91 98765 43210",
+        )
+
+        # Create Free-tier subscription for the demo landlord
+        Subscription.objects.create(
+            landlord=landlord,
+            tier=Subscription.Tier.FREE,
+            max_units=5,
+            max_tenants=5,
         )
 
         bank_1 = BankAccount.objects.create(

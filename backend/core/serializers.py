@@ -5,7 +5,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.authtoken.models import Token
 
-from .models import BankAccount, Building, JuspayOrder, Payment, Tenancy, Unit, User
+from .models import AddOn, BankAccount, Building, JuspayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -226,4 +226,57 @@ class CreateBankAccountSerializer(serializers.Serializer):
 class CreateTenancySerializer(serializers.Serializer):
     tenant_identifier = serializers.CharField(help_text="Tenant code (RF-XXXX) or email address")
     unit_id = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Subscription & Add-on serializers
+# ---------------------------------------------------------------------------
+
+class AddOnSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    price_monthly = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AddOn
+        fields = ("feature", "name", "is_active", "price_monthly", "created_at")
+
+    def get_name(self, obj):
+        return ADDON_CATALOG.get(obj.feature, {}).get("name", obj.feature)
+
+    def get_price_monthly(self, obj):
+        return ADDON_CATALOG.get(obj.feature, {}).get("price_monthly", 0)
+
+
+class SubscriptionSerializer(serializers.ModelSerializer):
+    units_used = serializers.IntegerField(read_only=True)
+    tenants_used = serializers.IntegerField(read_only=True)
+    add_ons = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Subscription
+        fields = (
+            "tier", "max_units", "max_tenants", "valid_until", "is_active",
+            "units_used", "tenants_used", "add_ons",
+        )
+
+    def get_add_ons(self, obj):
+        addons = AddOn.objects.filter(landlord=obj.landlord, is_active=True)
+        return AddOnSerializer(addons, many=True).data
+
+
+class PlanSerializer(serializers.Serializer):
+    tier = serializers.CharField()
+    name = serializers.CharField()
+    price_monthly = serializers.IntegerField()
+    max_units = serializers.IntegerField()
+    max_tenants = serializers.IntegerField()
+    features = serializers.ListField(child=serializers.CharField())
+
+
+class UpgradeSubscriptionSerializer(serializers.Serializer):
+    tier = serializers.ChoiceField(choices=[("pro", "Pro"), ("business", "Business")])
+
+
+class ActivateAddOnSerializer(serializers.Serializer):
+    feature = serializers.ChoiceField(choices=AddOn.Feature.choices)
 

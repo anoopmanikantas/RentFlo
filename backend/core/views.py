@@ -1,16 +1,20 @@
+import csv
+import io
 import uuid
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Sum
+from django.db.models import Count, Sum
+from django.http import HttpResponse
 from rest_framework import permissions, status
 from rest_framework.authtoken.models import Token
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import BankAccount, Building, JuspayOrder, Payment, Tenancy, Unit, User
+from .models import AddOn, BankAccount, Building, JuspayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
 from .serializers import (
+    ActivateAddOnSerializer,
     AuthLoginSerializer,
     BankAccountSerializer,
     BuildingSerializer,
@@ -22,10 +26,13 @@ from .serializers import (
     GoogleLoginSerializer,
     InitiatePaymentSerializer,
     PaymentSerializer,
+    PlanSerializer,
     SignupSerializer,
+    SubscriptionSerializer,
     TenantSummarySerializer,
     UnitSerializer,
     UpdateRoleSerializer,
+    UpgradeSubscriptionSerializer,
     UserSerializer,
 )
 from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
@@ -48,6 +55,59 @@ class AuthenticatedAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
 
+def _ensure_subscription(user):
+    """Return (or auto-create) the landlord's Subscription row."""
+    sub, created = Subscription.objects.get_or_create(
+        landlord=user,
+        defaults={"tier": Subscription.Tier.FREE, "max_units": 5, "max_tenants": 5},
+    )
+    return sub
+
+
+def _check_tier_limit(user, resource: str):
+    """
+    Check if the landlord can add another unit or tenant.
+    Returns None if OK, else a DRF Response with 403.
+    """
+    sub = _ensure_subscription(user)
+    if resource == "units":
+        current = Unit.objects.filter(building__landlord=user).count()
+        if current >= sub.max_units:
+            return Response(
+                {
+                    "detail": f"{sub.get_tier_display()} plan limit: {sub.max_units} units. Upgrade to add more.",
+                    "limit_type": "units",
+                    "current": current,
+                    "max": sub.max_units,
+                    "tier": sub.tier,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+    elif resource == "tenants":
+        current = Tenancy.objects.filter(landlord=user, is_active=True).count()
+        if current >= sub.max_tenants:
+            return Response(
+                {
+                    "detail": f"{sub.get_tier_display()} plan limit: {sub.max_tenants} tenants. Upgrade to add more.",
+                    "limit_type": "tenants",
+                    "current": current,
+                    "max": sub.max_tenants,
+                    "tier": sub.tier,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+    return None
+
+
+def _has_feature(user, feature: str) -> bool:
+    """Check if the landlord has access to a premium feature (via tier or add-on)."""
+    sub = _ensure_subscription(user)
+    tier_features = TIER_LIMITS.get(sub.tier, {}).get("features", [])
+    if feature in tier_features:
+        return True
+    return AddOn.objects.filter(landlord=user, feature=feature, is_active=True).exists()
+
+
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -66,6 +126,8 @@ class SignupView(APIView):
         serializer = SignupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        if user.role == User.Role.LANDLORD:
+            _ensure_subscription(user)
         token, _ = Token.objects.get_or_create(user=user)
         return Response(
             {"token": token.key, "user": UserSerializer(user).data},
@@ -159,6 +221,7 @@ class LandlordDashboardView(AuthenticatedAPIView):
                 "monthly_collected": monthly_collected,
                 "monthly_outstanding": max(monthly_due - monthly_collected, Decimal("0.00")),
             },
+            "subscription": _get_subscription_payload(request.user, units.count(), tenancies.count()),
             "bank_accounts": BankAccountSerializer(bank_accounts, many=True).data,
             "buildings": BuildingSerializer(request.user.buildings.all().order_by("name"), many=True).data,
             "units": UnitSerializer(units, many=True).data,
@@ -380,6 +443,9 @@ class CreateUnitView(AuthenticatedAPIView):
     def post(self, request):
         if request.user.role != User.Role.LANDLORD:
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        limit_resp = _check_tier_limit(request.user, "units")
+        if limit_resp:
+            return limit_resp
         serializer = CreateUnitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         building = Building.objects.filter(
@@ -409,6 +475,9 @@ class CreateTenancyView(AuthenticatedAPIView):
     def post(self, request):
         if request.user.role != User.Role.LANDLORD:
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        limit_resp = _check_tier_limit(request.user, "tenants")
+        if limit_resp:
+            return limit_resp
         serializer = CreateTenancySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         tenant = _resolve_tenant(serializer.validated_data["tenant_identifier"])
@@ -456,3 +525,359 @@ class EndTenancyView(AuthenticatedAPIView):
         tenancy.is_active = False
         tenancy.save(update_fields=["is_active", "updated_at"])
         return Response({"detail": f"Tenancy ended for {tenancy.tenant_user.get_full_name()}."})
+
+
+# ---------------------------------------------------------------------------
+# Subscription helper
+# ---------------------------------------------------------------------------
+
+def _get_subscription_payload(user, units_used: int, tenants_used: int) -> dict:
+    sub = _ensure_subscription(user)
+    addons = AddOn.objects.filter(landlord=user, is_active=True)
+    addon_features = list(addons.values_list("feature", flat=True))
+    tier_features = TIER_LIMITS.get(sub.tier, {}).get("features", [])
+    has_analytics = "analytics" in tier_features or "analytics" in addon_features
+    has_reports = "reports_export" in tier_features or "reports_export" in addon_features
+    return {
+        "tier": sub.tier,
+        "max_units": sub.max_units,
+        "max_tenants": sub.max_tenants,
+        "units_used": units_used,
+        "tenants_used": tenants_used,
+        "valid_until": sub.valid_until,
+        "is_active": sub.is_active,
+        "has_analytics": has_analytics,
+        "has_reports": has_reports,
+        "add_ons": [{"feature": a.feature, "is_active": a.is_active} for a in addons],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Subscription & Plans endpoints
+# ---------------------------------------------------------------------------
+
+class SubscriptionView(AuthenticatedAPIView):
+    """GET current subscription + available plans."""
+
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        units_used = Unit.objects.filter(building__landlord=request.user).count()
+        tenants_used = Tenancy.objects.filter(landlord=request.user, is_active=True).count()
+        subscription = _get_subscription_payload(request.user, units_used, tenants_used)
+
+        plans = []
+        for tier_key, limits in TIER_LIMITS.items():
+            feature_names = []
+            for f in limits["features"]:
+                feature_names.append(ADDON_CATALOG.get(f, {}).get("name", f))
+            plans.append({
+                "tier": tier_key,
+                "name": tier_key.capitalize(),
+                "price_monthly": limits["price_monthly"],
+                "max_units": limits["max_units"],
+                "max_tenants": limits["max_tenants"],
+                "features": feature_names,
+            })
+
+        addons_catalog = []
+        for feature_key, info in ADDON_CATALOG.items():
+            already_active = AddOn.objects.filter(landlord=request.user, feature=feature_key, is_active=True).exists()
+            included_in_tier = feature_key in TIER_LIMITS.get(subscription["tier"], {}).get("features", [])
+            addons_catalog.append({
+                "feature": feature_key,
+                "name": info["name"],
+                "price_monthly": info["price_monthly"],
+                "is_active": already_active,
+                "included_in_tier": included_in_tier,
+            })
+
+        return Response({
+            "subscription": subscription,
+            "plans": plans,
+            "addons_catalog": addons_catalog,
+        })
+
+
+class UpgradeSubscriptionView(AuthenticatedAPIView):
+    """POST to upgrade the subscription tier (Razorpay checkout)."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = UpgradeSubscriptionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target_tier = serializer.validated_data["tier"]
+
+        sub = _ensure_subscription(request.user)
+        tier_order = {"free": 0, "pro": 1, "business": 2}
+        if tier_order.get(target_tier, 0) <= tier_order.get(sub.tier, 0):
+            return Response(
+                {"detail": f"You are already on {sub.get_tier_display()} or higher."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        limits = TIER_LIMITS[target_tier]
+        client = RazorpayClient()
+        try:
+            order_data = client.create_order(
+                order_id=f"sub_upgrade_{request.user.id}_{target_tier}_{uuid.uuid4().hex[:8]}",
+                amount=Decimal(str(limits["price_monthly"])),
+                customer_email=request.user.email,
+                customer_name=request.user.get_full_name(),
+            )
+        except RazorpayClientError as exc:
+            return Response({"detail": str(exc)}, status=502)
+
+        return Response({
+            "target_tier": target_tier,
+            "price_monthly": limits["price_monthly"],
+            "mode": order_data["mode"],
+            "provider": "razorpay",
+            "order_id": order_data["order_id"],
+            "razorpay_order_id": order_data.get("razorpay_order_id", ""),
+            "sdk_payload": order_data["sdk_payload"],
+        }, status=status.HTTP_201_CREATED)
+
+
+class ConfirmUpgradeView(AuthenticatedAPIView):
+    """POST to finalize a tier upgrade after Razorpay payment."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        target_tier = request.data.get("tier")
+        if target_tier not in ("pro", "business"):
+            return Response({"detail": "Invalid tier."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # In mock mode we trust the client; in live mode you'd verify the
+        # Razorpay signature here (same pattern as ConfirmTenantPaymentView).
+        sub = _ensure_subscription(request.user)
+        sub.apply_tier_limits(target_tier)
+        sub.razorpay_subscription_id = request.data.get("razorpay_subscription_id", "")
+        sub.save()
+
+        return Response({
+            "detail": f"Upgraded to {sub.get_tier_display()}.",
+            "tier": sub.tier,
+            "max_units": sub.max_units,
+            "max_tenants": sub.max_tenants,
+        })
+
+
+class ActivateAddOnView(AuthenticatedAPIView):
+    """POST to purchase an add-on feature."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ActivateAddOnSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        feature = serializer.validated_data["feature"]
+
+        # Already included in tier?
+        sub = _ensure_subscription(request.user)
+        tier_features = TIER_LIMITS.get(sub.tier, {}).get("features", [])
+        if feature in tier_features:
+            return Response(
+                {"detail": f"Already included in your {sub.get_tier_display()} plan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        addon, created = AddOn.objects.get_or_create(
+            landlord=request.user,
+            feature=feature,
+            defaults={"is_active": False},
+        )
+        if addon.is_active:
+            return Response({"detail": "Add-on already active."}, status=status.HTTP_400_BAD_REQUEST)
+
+        catalog = ADDON_CATALOG.get(feature, {})
+        client = RazorpayClient()
+        try:
+            order_data = client.create_order(
+                order_id=f"addon_{request.user.id}_{feature}_{uuid.uuid4().hex[:8]}",
+                amount=Decimal(str(catalog.get("price_monthly", 0))),
+                customer_email=request.user.email,
+                customer_name=request.user.get_full_name(),
+            )
+        except RazorpayClientError as exc:
+            return Response({"detail": str(exc)}, status=502)
+
+        return Response({
+            "feature": feature,
+            "price_monthly": catalog.get("price_monthly", 0),
+            "mode": order_data["mode"],
+            "provider": "razorpay",
+            "order_id": order_data["order_id"],
+            "razorpay_order_id": order_data.get("razorpay_order_id", ""),
+            "sdk_payload": order_data["sdk_payload"],
+        }, status=status.HTTP_201_CREATED)
+
+
+class ConfirmAddOnView(AuthenticatedAPIView):
+    """POST to finalize add-on purchase after Razorpay payment."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        feature = request.data.get("feature")
+        if feature not in dict(AddOn.Feature.choices):
+            return Response({"detail": "Invalid feature."}, status=status.HTTP_400_BAD_REQUEST)
+
+        addon, _ = AddOn.objects.get_or_create(
+            landlord=request.user,
+            feature=feature,
+            defaults={"is_active": True},
+        )
+        addon.is_active = True
+        addon.razorpay_subscription_id = request.data.get("razorpay_subscription_id", "")
+        addon.save()
+
+        return Response({
+            "detail": f"{ADDON_CATALOG.get(feature, {}).get('name', feature)} activated.",
+            "feature": feature,
+            "is_active": True,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Analytics Dashboard (premium feature)
+# ---------------------------------------------------------------------------
+
+class AnalyticsDashboardView(AuthenticatedAPIView):
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Analytics requires the Pro plan or the Analytics add-on.", "feature": "analytics"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        today = date.today()
+        # Last 6 months revenue trend
+        revenue_trend = []
+        for i in range(5, -1, -1):
+            m = today.month - i
+            y = today.year
+            while m <= 0:
+                m += 12
+                y -= 1
+            month_str = f"{y}-{m:02d}"
+            total = (
+                Payment.objects.filter(
+                    landlord=request.user, rent_month=month_str, status=Payment.Status.SUCCEEDED,
+                ).aggregate(total=Sum("amount"))["total"]
+                or Decimal("0.00")
+            )
+            revenue_trend.append({"month": month_str, "collected": total})
+
+        total_units = Unit.objects.filter(building__landlord=request.user).count()
+        occupied_units = Tenancy.objects.filter(landlord=request.user, is_active=True).count()
+        occupancy_rate = round(occupied_units / total_units * 100, 1) if total_units else 0
+
+        # Collection rate for current month
+        month = current_month()
+        monthly_due = sum(
+            t.unit.monthly_rent
+            for t in Tenancy.objects.filter(landlord=request.user, is_active=True).select_related("unit")
+        )
+        monthly_collected = (
+            Payment.objects.filter(
+                landlord=request.user, rent_month=month, status=Payment.Status.SUCCEEDED,
+            ).aggregate(total=Sum("amount"))["total"]
+            or Decimal("0.00")
+        )
+        collection_rate = round(float(monthly_collected) / float(monthly_due) * 100, 1) if monthly_due else 0
+
+        # Top tenants by total payment
+        top_tenants = (
+            Payment.objects.filter(landlord=request.user, status=Payment.Status.SUCCEEDED)
+            .values("tenancy__tenant_user__first_name", "tenancy__tenant_user__last_name")
+            .annotate(total_paid=Sum("amount"))
+            .order_by("-total_paid")[:5]
+        )
+        top_tenants_list = [
+            {
+                "name": f"{t['tenancy__tenant_user__first_name']} {t['tenancy__tenant_user__last_name']}".strip(),
+                "total_paid": t["total_paid"],
+            }
+            for t in top_tenants
+        ]
+
+        return Response({
+            "revenue_trend": revenue_trend,
+            "occupancy_rate": occupancy_rate,
+            "total_units": total_units,
+            "occupied_units": occupied_units,
+            "collection_rate": collection_rate,
+            "monthly_due": monthly_due,
+            "monthly_collected": monthly_collected,
+            "top_tenants": top_tenants_list,
+            "current_month": month,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Payment Reports Export (premium feature)
+# ---------------------------------------------------------------------------
+
+class PaymentReportExportView(AuthenticatedAPIView):
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        if not _has_feature(request.user, "reports_export"):
+            return Response(
+                {"detail": "Reports export requires the Business plan or the Reports Export add-on.", "feature": "reports_export"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from_month = request.query_params.get("from", "")
+        to_month = request.query_params.get("to", "")
+
+        qs = Payment.objects.filter(landlord=request.user).select_related(
+            "tenancy__tenant_user", "unit__building", "bank_account",
+        ).order_by("-paid_on", "-created_at")
+
+        if from_month:
+            qs = qs.filter(rent_month__gte=from_month)
+        if to_month:
+            qs = qs.filter(rent_month__lte=to_month)
+
+        fmt = request.query_params.get("format", "csv")
+        if fmt == "json":
+            return Response(PaymentSerializer(qs, many=True).data)
+
+        # CSV export
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Tenant", "Building", "Unit", "Month", "Amount", "Paid On",
+            "Bank", "Account", "Status", "Reference", "Provider Payment ID",
+        ])
+        for p in qs:
+            writer.writerow([
+                p.tenancy.tenant_user.get_full_name(),
+                p.unit.building.name,
+                p.unit.label,
+                p.rent_month,
+                str(p.amount),
+                str(p.paid_on),
+                p.bank_account.bank_name,
+                p.bank_account.account_number,
+                p.status,
+                p.reference,
+                p.provider_payment_id,
+            ])
+
+        response = HttpResponse(output.getvalue(), content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="rentflo_payments_{date.today()}.csv"'
+        return response
