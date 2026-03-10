@@ -1,4 +1,4 @@
-# RentFlow
+# RentFlo
 
 Cross-platform rent tracking app:
 
