@@ -74,8 +74,8 @@ class Unit(TimestampedModel):
 
 class Tenancy(TimestampedModel):
     landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tenancies")
-    tenant_user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="tenancy")
-    unit = models.OneToOneField(Unit, on_delete=models.CASCADE, related_name="tenancy")
+    tenant_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tenancies_as_tenant")
+    unit = models.ForeignKey(Unit, on_delete=models.CASCADE, related_name="tenancies")
     start_date = models.DateField()
     is_active = models.BooleanField(default=True)
 

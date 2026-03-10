@@ -1,8 +1,18 @@
 import { StatusBar } from "expo-status-bar";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  startTransition,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
+  Appearance,
   Platform,
   Pressable,
   SafeAreaView,
@@ -36,17 +46,654 @@ import {
 } from "./src/api";
 import { launchRazorpayPayment } from "./src/razorpay";
 
+// ─── Theme system ───────────────────────────────────────────────────────────
+
+type Theme = {
+  mode: "light" | "dark";
+  bg: string;
+  surface: string;
+  card: string;
+  cardAlt: string;
+  primary: string;
+  primaryMuted: string;
+  primaryText: string;
+  text: string;
+  textSecondary: string;
+  accent: string;
+  border: string;
+  borderStrong: string;
+  inputBg: string;
+  inputBorder: string;
+  bannerBg: string;
+  bannerBusy: string;
+  success: string;
+  successText: string;
+  warning: string;
+  warningText: string;
+  neutral: string;
+  danger: string;
+  dangerText: string;
+  badgeText: string;
+  shadow: string;
+};
+
+const lightTheme: Theme = {
+  mode: "light",
+  bg: "#f6f2eb",
+  surface: "rgba(255,252,247,0.88)",
+  card: "#ffffff",
+  cardAlt: "#fff9f2",
+  primary: "#c45a32",
+  primaryMuted: "rgba(196,90,50,0.08)",
+  primaryText: "#ffffff",
+  text: "#1a1714",
+  textSecondary: "#6b6053",
+  accent: "#7a3219",
+  border: "rgba(67,49,35,0.08)",
+  borderStrong: "rgba(67,49,35,0.16)",
+  inputBg: "#ffffff",
+  inputBorder: "rgba(67,49,35,0.14)",
+  bannerBg: "#f0ddd0",
+  bannerBusy: "#f6eadc",
+  success: "rgba(28,124,84,0.10)",
+  successText: "#1c7c54",
+  warning: "rgba(163,95,0,0.10)",
+  warningText: "#a35f00",
+  neutral: "rgba(90,81,71,0.10)",
+  danger: "rgba(180,40,40,0.08)",
+  dangerText: "#b42828",
+  badgeText: "#433123",
+  shadow: "rgba(0,0,0,0.06)",
+};
+
+const darkTheme: Theme = {
+  mode: "dark",
+  bg: "#0f0f17",
+  surface: "rgba(25,25,38,0.85)",
+  card: "#1a1a26",
+  cardAlt: "#1e1e2c",
+  primary: "#e07a4f",
+  primaryMuted: "rgba(224,122,79,0.12)",
+  primaryText: "#ffffff",
+  text: "#eae6e0",
+  textSecondary: "#7d7670",
+  accent: "#e8915e",
+  border: "rgba(255,255,255,0.06)",
+  borderStrong: "rgba(255,255,255,0.12)",
+  inputBg: "#1a1a24",
+  inputBorder: "rgba(255,255,255,0.08)",
+  bannerBg: "rgba(224,122,79,0.08)",
+  bannerBusy: "rgba(224,122,79,0.05)",
+  success: "rgba(72,187,120,0.14)",
+  successText: "#48bb78",
+  warning: "rgba(236,201,75,0.14)",
+  warningText: "#ecc94b",
+  neutral: "rgba(160,148,138,0.10)",
+  danger: "rgba(220,80,80,0.12)",
+  dangerText: "#fc6b6b",
+  badgeText: "#cfc8bf",
+  shadow: "rgba(0,0,0,0.4)",
+};
+
+type ThemeCtx = {
+  t: Theme;
+  s: ReturnType<typeof makeStyles>;
+  toggle: () => void;
+};
+
+const ThemeContext = createContext<ThemeCtx>(null!);
+
+function useT() {
+  return useContext(ThemeContext);
+}
+
+// ─── Dynamic styles ─────────────────────────────────────────────────────────
+
+const webTransition = Platform.select({
+  web: { transition: "all 0.25s cubic-bezier(0.4,0,0.2,1)" } as any,
+  default: {},
+});
+
+const webGlass = Platform.select({
+  web: { backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" } as any,
+  default: {},
+});
+
+function makeStyles(t: Theme) {
+  return StyleSheet.create({
+    safeArea: {
+      flex: 1,
+      backgroundColor: t.bg,
+      ...webTransition,
+    },
+    pageOuter: {
+      alignItems: "center",
+      paddingVertical: 28,
+      paddingHorizontal: 16,
+    },
+    pageInner: {
+      width: "100%",
+      maxWidth: 520,
+      gap: 20,
+    },
+    hero: {
+      gap: 16,
+      padding: 26,
+      borderRadius: 24,
+      backgroundColor: t.cardAlt,
+      borderWidth: 1,
+      borderColor: t.border,
+      ...webTransition,
+    },
+    heroTop: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    eyebrow: {
+      color: t.accent,
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 1.6,
+      textTransform: "uppercase",
+      marginBottom: 8,
+    },
+    title: {
+      fontSize: 42,
+      fontWeight: "900",
+      color: t.text,
+      letterSpacing: -0.5,
+    },
+    subtitle: {
+      color: t.textSecondary,
+      fontSize: 15,
+      lineHeight: 23,
+      marginTop: 8,
+    },
+    note: {
+      marginTop: 10,
+      color: t.warningText,
+      fontSize: 13,
+    },
+    roleCard: {
+      padding: 16,
+      borderRadius: 20,
+      backgroundColor: t.primaryMuted,
+      gap: 6,
+      ...webTransition,
+    },
+    roleTitle: {
+      fontWeight: "800",
+      color: t.accent,
+      fontSize: 12,
+    },
+    roleText: {
+      color: t.text,
+    },
+    themeToggle: {
+      width: 42,
+      height: 42,
+      borderRadius: 21,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: t.primaryMuted,
+      borderWidth: 1,
+      borderColor: t.border,
+      marginBottom: 8,
+      ...webTransition,
+    },
+    themeToggleIcon: {
+      fontSize: 20,
+    },
+    panel: {
+      backgroundColor: t.surface,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: t.border,
+      padding: 22,
+      gap: 16,
+      ...webGlass,
+      ...webTransition,
+    },
+    sectionKicker: {
+      color: t.accent,
+      fontSize: 11,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 1.4,
+    },
+    panelTitle: {
+      fontSize: 24,
+      fontWeight: "800",
+      color: t.text,
+      letterSpacing: -0.3,
+    },
+    formGrid: {
+      gap: 14,
+    },
+    field: {
+      gap: 8,
+    },
+    fieldLabel: {
+      fontWeight: "700",
+      color: t.text,
+      fontSize: 14,
+    },
+    input: {
+      borderRadius: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 13,
+      borderWidth: 1,
+      borderColor: t.inputBorder,
+      backgroundColor: t.inputBg,
+      fontSize: 15,
+      color: t.text,
+      ...webTransition,
+    },
+    button: {
+      paddingVertical: 14,
+      paddingHorizontal: 28,
+      borderRadius: 14,
+      alignItems: "center",
+      alignSelf: "flex-start",
+    },
+    primaryButton: {
+      backgroundColor: t.primary,
+    },
+    secondaryButton: {
+      backgroundColor: t.primaryMuted,
+    },
+    googleButton: {
+      backgroundColor: t.card,
+      borderWidth: 1,
+      borderColor: t.borderStrong,
+    },
+    buttonText: {
+      color: t.primaryText,
+      fontWeight: "800",
+      fontSize: 15,
+    },
+    secondaryButtonText: {
+      color: t.accent,
+      fontWeight: "700",
+    },
+    googleButtonText: {
+      color: t.text,
+      fontWeight: "800",
+    },
+    disabledButton: {
+      opacity: 0.4,
+    },
+    sessionBar: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 12,
+      padding: 14,
+      paddingHorizontal: 18,
+      borderRadius: 16,
+      backgroundColor: t.cardAlt,
+      borderWidth: 1,
+      borderColor: t.border,
+      ...webTransition,
+    },
+    sessionText: {
+      color: t.text,
+      fontWeight: "700",
+    },
+    banner: {
+      flexDirection: "row",
+      gap: 10,
+      alignItems: "center",
+      padding: 14,
+      borderRadius: 18,
+      backgroundColor: t.bannerBg,
+      ...webTransition,
+    },
+    bannerBusy: {
+      backgroundColor: t.bannerBusy,
+    },
+    bannerText: {
+      flex: 1,
+      color: t.text,
+      fontSize: 14,
+    },
+    stack: {
+      gap: 20,
+    },
+    summaryGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 12,
+    },
+    summaryCard: {
+      flex: 1,
+      minWidth: 140,
+      padding: 18,
+      borderRadius: 22,
+      backgroundColor: t.surface,
+      borderWidth: 1,
+      borderColor: t.border,
+      ...webGlass,
+      ...webTransition,
+    },
+    summaryLabel: {
+      color: t.accent,
+      fontSize: 11,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+    },
+    summaryValue: {
+      color: t.text,
+      fontSize: 26,
+      fontWeight: "900",
+      marginTop: 10,
+    },
+    summaryNote: {
+      color: t.textSecondary,
+      marginTop: 8,
+      fontSize: 13,
+    },
+    tableLike: {
+      gap: 12,
+    },
+    tableRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      padding: 14,
+      borderRadius: 18,
+      backgroundColor: t.card,
+      borderWidth: 1,
+      borderColor: t.border,
+      gap: 10,
+      ...webTransition,
+    },
+    tableMain: {
+      flex: 1,
+      minWidth: 120,
+      gap: 4,
+    },
+    tableNumbers: {
+      alignItems: "flex-end",
+      gap: 4,
+    },
+    rowTitle: {
+      color: t.text,
+      fontWeight: "800",
+      fontSize: 16,
+    },
+    rowMeta: {
+      color: t.textSecondary,
+      fontSize: 13,
+    },
+    rowValue: {
+      color: t.text,
+      fontWeight: "800",
+    },
+    badge: {
+      alignSelf: "flex-start",
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+    },
+    goodBadge: {
+      backgroundColor: t.success,
+    },
+    neutralBadge: {
+      backgroundColor: t.neutral,
+    },
+    warnBadge: {
+      backgroundColor: t.warning,
+    },
+    badgeText: {
+      textTransform: "capitalize",
+      color: t.badgeText,
+      fontWeight: "800",
+      fontSize: 12,
+    },
+    removeButton: {
+      alignSelf: "flex-start",
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      backgroundColor: t.danger,
+    },
+    removeButtonText: {
+      color: t.dangerText,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    helper: {
+      color: t.textSecondary,
+      lineHeight: 20,
+      fontSize: 14,
+    },
+    authTabs: {
+      flexDirection: "row",
+      gap: 8,
+      marginBottom: 4,
+    },
+    authTab: {
+      paddingVertical: 8,
+      paddingHorizontal: 16,
+      borderRadius: 999,
+      backgroundColor: t.primaryMuted,
+      ...webTransition,
+    },
+    authTabActive: {
+      backgroundColor: t.primary,
+    },
+    authTabText: {
+      fontWeight: "800",
+      color: t.accent,
+    },
+    authTabTextActive: {
+      color: t.primaryText,
+    },
+    roleToggle: {
+      gap: 8,
+      marginBottom: 4,
+    },
+    roleOptions: {
+      flexDirection: "row",
+      gap: 8,
+    },
+    roleOption: {
+      flex: 1,
+      paddingVertical: 14,
+      paddingHorizontal: 8,
+      borderRadius: 16,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: t.borderStrong,
+      backgroundColor: t.card,
+      ...webTransition,
+    },
+    roleOptionActive: {
+      backgroundColor: t.primary,
+      borderColor: t.primary,
+    },
+    roleOptionText: {
+      fontWeight: "700",
+      color: t.text,
+    },
+    roleOptionTextActive: {
+      color: t.primaryText,
+    },
+    divider: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: t.border,
+    },
+    dividerText: {
+      color: t.textSecondary,
+      fontWeight: "700",
+      fontSize: 13,
+    },
+    actionChip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: t.borderStrong,
+      backgroundColor: t.card,
+      ...webTransition,
+    },
+    actionChipActive: {
+      backgroundColor: t.primary,
+      borderColor: t.primary,
+    },
+    actionChipText: {
+      fontWeight: "700",
+      color: t.text,
+      fontSize: 14,
+    },
+    actionChipTextActive: {
+      color: t.primaryText,
+    },
+    selectChip: {
+      paddingVertical: 8,
+      paddingHorizontal: 14,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: t.borderStrong,
+      backgroundColor: t.card,
+      ...webTransition,
+    },
+    selectChipActive: {
+      backgroundColor: t.primary,
+      borderColor: t.primary,
+    },
+    selectChipText: {
+      fontWeight: "700",
+      color: t.text,
+      fontSize: 14,
+    },
+    selectChipTextActive: {
+      color: t.primaryText,
+    },
+    inlineForm: {
+      gap: 14,
+      padding: 18,
+      borderRadius: 18,
+      backgroundColor: t.card,
+      borderWidth: 1,
+      borderColor: t.border,
+      ...webTransition,
+    },
+    inlineFormTitle: {
+      fontSize: 17,
+      fontWeight: "800",
+      color: t.text,
+    },
+    addressDropdown: {
+      position: "absolute",
+      top: "100%",
+      left: 0,
+      right: 0,
+      zIndex: 50,
+      marginTop: 4,
+      backgroundColor: t.card,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: t.border,
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: t.mode === "dark" ? 0.3 : 0.08,
+      shadowRadius: 12,
+      elevation: 6,
+      overflow: "hidden",
+    },
+    addressItem: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 8,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: t.border,
+    },
+    addressItemIcon: {
+      fontSize: 14,
+      marginTop: 2,
+    },
+    addressItemText: {
+      flex: 1,
+      fontSize: 13,
+      color: t.text,
+      lineHeight: 18,
+    },
+    locationButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 6,
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: 10,
+      backgroundColor: t.primaryMuted,
+      marginTop: 2,
+    },
+    locationButtonText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: t.accent,
+    },
+  });
+}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
 const initialPaymentForm: InitiatePaymentInput = {
   bank_account_id: 0,
   rent_month: "",
   amount: "",
 };
 
+// ─── App ────────────────────────────────────────────────────────────────────
+
 export default function App() {
+  // Theme
+  const [isDark, setIsDark] = useState(false);
+  const [themeReady, setThemeReady] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem("theme").then((stored) => {
+      if (stored) {
+        setIsDark(stored === "dark");
+      } else {
+        const sys = Appearance?.getColorScheme?.();
+        if (sys === "dark") setIsDark(true);
+      }
+      setThemeReady(true);
+    });
+  }, []);
+
+  const t = isDark ? darkTheme : lightTheme;
+  const styles = useMemo(() => makeStyles(t), [isDark]);
+  const toggleTheme = useCallback(() => {
+    setIsDark((prev) => {
+      const next = !prev;
+      AsyncStorage.setItem("theme", next ? "dark" : "light");
+      return next;
+    });
+  }, []);
+  const themeCtx = useMemo(() => ({ t, s: styles, toggle: toggleTheme }), [t, styles, toggleTheme]);
+
+  // Auth state
   const [authScreen, setAuthScreen] = useState<"login" | "signup">("login");
   const [username, setUsername] = useState("owner");
   const [password, setPassword] = useState("owner123");
-  // Signup fields
   const [signupUsername, setSignupUsername] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
@@ -90,7 +737,6 @@ export default function App() {
   // Save token and user to persistent storage whenever they change
   useEffect(() => {
     if (!isInitialized) return;
-    
     const saveAuth = async () => {
       try {
         if (token && user) {
@@ -109,10 +755,7 @@ export default function App() {
 
   // Fetch dashboard data when token or user changes
   useEffect(() => {
-    if (!token || !user) {
-      return;
-    }
-
+    if (!token || !user) return;
     setBusy(true);
     const load = async () => {
       try {
@@ -142,7 +785,6 @@ export default function App() {
         setBusy(false);
       }
     };
-
     void load();
   }, [token, user]);
 
@@ -200,7 +842,6 @@ export default function App() {
           setBusy(false);
           return;
         }
-        // Use Google's GSI (Sign In With Google) JavaScript API
         const idToken = await new Promise<string>((resolve, reject) => {
           const script = document.createElement("script");
           script.src = "https://accounts.google.com/gsi/client";
@@ -217,7 +858,6 @@ export default function App() {
             });
             (window as any).google.accounts.id.prompt((notification: any) => {
               if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-                // Fallback: render a temporary button
                 const container = document.createElement("div");
                 container.id = "g_id_signin_tmp";
                 container.style.position = "fixed";
@@ -236,7 +876,6 @@ export default function App() {
                   text: "continue_with",
                   width: 300,
                 });
-                // Cleanup after 60s
                 setTimeout(() => {
                   container.remove();
                   reject(new Error("Google Sign-In timed out."));
@@ -248,10 +887,8 @@ export default function App() {
           document.head.appendChild(script);
         });
         const auth = await googleLogin(idToken);
-        // Clean up any leftover prompt container
         document.getElementById("g_id_signin_tmp")?.remove();
         if (auth.is_new) {
-          // New user – save token & user, then show role picker
           startTransition(() => {
             setToken(auth.token);
             setUser(auth.user);
@@ -314,9 +951,7 @@ export default function App() {
   }
 
   async function handleTenantPayment() {
-    if (!tenantData) {
-      return;
-    }
+    if (!tenantData) return;
     setBusy(true);
     setMessage("Launching Razorpay checkout...");
     try {
@@ -324,12 +959,11 @@ export default function App() {
       const result = await launchRazorpayPayment(initiated);
 
       if (result.status === "cancelled") {
-        // Confirm as failed so the backend order is cleaned up (no Payment record created)
         await confirmTenantPayment(token, {
           order_id: initiated.order_id,
           status: "failed",
           provider_payload: { reason: "cancelled_by_user" },
-        }).catch(() => {}); // best-effort cleanup
+        }).catch(() => {});
         setMessage("Payment was cancelled.");
         setBusy(false);
         return;
@@ -347,7 +981,6 @@ export default function App() {
         return;
       }
 
-      // Only confirm as succeeded when checkout actually succeeded
       await confirmTenantPayment(token, {
         order_id: initiated.order_id,
         status: "succeeded",
@@ -378,165 +1011,185 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.pageOuter}>
-        <View style={styles.pageInner}>
-        <View style={styles.hero}>
-          <View>
-            <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
-            <Text style={styles.title}>RentFlo</Text>
-            <Text style={styles.subtitle}>
-              One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
-            </Text>
-            <Text style={styles.note}>
-              API base URL: {Platform.OS === "web" ? "http://localhost:8085/api" : "Set EXPO_PUBLIC_API_URL"}
-            </Text>
-          </View>
-          <View style={styles.roleCard}>
-            <Text style={styles.roleTitle}>{user ? `${user.role.toUpperCase()} SESSION` : "DEMO LOGINS"}</Text>
-            <Text style={styles.roleText}>Landlord: owner / owner123</Text>
-            <Text style={styles.roleText}>Tenant: riya / tenant123</Text>
-          </View>
-        </View>
-
-        {!user ? (
-          <View style={styles.panel}>
-            <View style={styles.authTabs}>
-              <Pressable
-                style={[styles.authTab, authScreen === "login" && styles.authTabActive]}
-                onPress={() => setAuthScreen("login")}
-              >
-                <Text style={[styles.authTabText, authScreen === "login" && styles.authTabTextActive]}>Sign in</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.authTab, authScreen === "signup" && styles.authTabActive]}
-                onPress={() => setAuthScreen("signup")}
-              >
-                <Text style={[styles.authTabText, authScreen === "signup" && styles.authTabTextActive]}>Sign up</Text>
-              </Pressable>
+    <ThemeContext.Provider value={themeCtx}>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <ScrollView contentContainerStyle={styles.pageOuter}>
+          <View style={styles.pageInner}>
+            <View style={styles.hero}>
+              <View>
+                <View style={styles.heroTop}>
+                  <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
+                  <ThemeToggle />
+                </View>
+                <Text style={styles.title}>RentFlo</Text>
+                <Text style={styles.subtitle}>
+                  One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
+                </Text>
+                <Text style={styles.note}>
+                  API base URL: {Platform.OS === "web" ? "http://localhost:8085/api" : "Set EXPO_PUBLIC_API_URL"}
+                </Text>
+              </View>
+              <View style={styles.roleCard}>
+                <Text style={styles.roleTitle}>{user ? `${user.role.toUpperCase()} SESSION` : "DEMO LOGINS"}</Text>
+                <Text style={styles.roleText}>Landlord: owner / owner123</Text>
+                <Text style={styles.roleText}>Tenant: riya / tenant123</Text>
+              </View>
             </View>
 
-            {authScreen === "login" ? (
-              <>
-                <View style={styles.formGrid}>
-                  <Field label="Username" value={username} onChangeText={setUsername} />
-                  <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+            {!user ? (
+              <View style={styles.panel}>
+                <View style={styles.authTabs}>
+                  <Pressable
+                    style={[styles.authTab, authScreen === "login" && styles.authTabActive]}
+                    onPress={() => setAuthScreen("login")}
+                  >
+                    <Text style={[styles.authTabText, authScreen === "login" && styles.authTabTextActive]}>Sign in</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.authTab, authScreen === "signup" && styles.authTabActive]}
+                    onPress={() => setAuthScreen("signup")}
+                  >
+                    <Text style={[styles.authTabText, authScreen === "signup" && styles.authTabTextActive]}>Sign up</Text>
+                  </Pressable>
                 </View>
-                <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} fullWidth />
-              </>
+
+                {authScreen === "login" ? (
+                  <>
+                    <View style={styles.formGrid}>
+                      <Field label="Username" value={username} onChangeText={setUsername} />
+                      <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                    </View>
+                    <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} fullWidth />
+                  </>
+                ) : (
+                  <>
+                    <View style={styles.roleToggle}>
+                      <Text style={styles.fieldLabel}>I am a</Text>
+                      <View style={styles.roleOptions}>
+                        <Pressable
+                          style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
+                          onPress={() => setSignupRole("landlord")}
+                        >
+                          <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
+                          <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
+                            Landlord
+                          </Text>
+                          <Text style={[styles.helper, signupRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                            Manage properties & collect rent
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
+                          onPress={() => setSignupRole("tenant")}
+                        >
+                          <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
+                          <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
+                            Tenant
+                          </Text>
+                          <Text style={[styles.helper, signupRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                            Pay rent & track payments
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                    <View style={styles.formGrid}>
+                      <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
+                      <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
+                      <Field label="Password" value={signupPassword} onChangeText={setSignupPassword} secureTextEntry />
+                      <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
+                      <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
+                      <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} />
+                    </View>
+                    <PrimaryButton label={busy ? "Creating account..." : `Create ${signupRole} account`} onPress={handleSignup} disabled={busy} fullWidth />
+                  </>
+                )}
+
+                <View style={styles.divider}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>or</Text>
+                  <View style={styles.dividerLine} />
+                </View>
+
+                <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" fullWidth />
+              </View>
             ) : (
-              <>
-                <View style={styles.roleToggle}>
-                  <Text style={styles.fieldLabel}>I am a</Text>
-                  <View style={styles.roleOptions}>
-                    <Pressable
-                      style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
-                      onPress={() => setSignupRole("landlord")}
-                    >
-                      <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
-                      <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
-                        Landlord
-                      </Text>
-                      <Text style={[styles.helper, signupRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
-                        Manage properties & collect rent
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
-                      onPress={() => setSignupRole("tenant")}
-                    >
-                      <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
-                      <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
-                        Tenant
-                      </Text>
-                      <Text style={[styles.helper, signupRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
-                        Pay rent & track payments
-                      </Text>
-                    </Pressable>
-                  </View>
-                </View>
-                <View style={styles.formGrid}>
-                  <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
-                  <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
-                  <Field label="Password" value={signupPassword} onChangeText={setSignupPassword} secureTextEntry />
-                  <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
-                  <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
-                  <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} />
-                </View>
-                <PrimaryButton label={busy ? "Creating account..." : `Create ${signupRole} account`} onPress={handleSignup} disabled={busy} fullWidth />
-              </>
+              <View style={styles.sessionBar}>
+                <Text style={styles.sessionText}>
+                  Signed in as {user.first_name || user.username} ({user.role})
+                </Text>
+                <PrimaryButton label="Logout" onPress={logout} variant="secondary" />
+              </View>
             )}
 
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or</Text>
-              <View style={styles.dividerLine} />
+            <View style={[styles.banner, busy && styles.bannerBusy]}>
+              {busy ? <ActivityIndicator color={t.accent} /> : null}
+              <Text style={styles.bannerText}>{message}</Text>
             </View>
 
-            <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" fullWidth />
+            {user?.role === "landlord" && landlordData ? (
+              <LandlordView
+                data={landlordData}
+                token={token}
+                onRefresh={async () => {
+                  const data = await fetchLandlordDashboard(token);
+                  setLandlordData(data);
+                }}
+              />
+            ) : null}
+            {user?.role === "tenant" && tenantData ? (
+              tenantData.tenancy ? (
+                <TenantView
+                  user={user}
+                  data={tenantData as TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> }}
+                  paymentForm={paymentForm}
+                  setPaymentForm={setPaymentForm}
+                  onSubmit={handleTenantPayment}
+                  busy={busy}
+                />
+              ) : (
+                <TenantWelcome user={user} />
+              )
+            ) : null}
+
+            {showRolePicker && user ? <RolePicker onSelect={handleRoleSelect} busy={busy} /> : null}
           </View>
-        ) : (
-          <View style={styles.sessionBar}>
-            <Text style={styles.sessionText}>
-              Signed in as {user.first_name || user.username} ({user.role})
-            </Text>
-            <PrimaryButton label="Logout" onPress={logout} variant="secondary" />
-          </View>
-        )}
+        </ScrollView>
+      </SafeAreaView>
+    </ThemeContext.Provider>
+  );
+}
 
-        <View style={[styles.banner, busy && styles.bannerBusy]}>
-          {busy ? <ActivityIndicator color="#6e2d19" /> : null}
-          <Text style={styles.bannerText}>{message}</Text>
-        </View>
+// ─── Sub-components ─────────────────────────────────────────────────────────
 
-        {user?.role === "landlord" && landlordData ? <LandlordView data={landlordData} token={token} onRefresh={async () => {
-          const data = await fetchLandlordDashboard(token);
-          setLandlordData(data);
-        }} /> : null}
-        {user?.role === "tenant" && tenantData ? (
-          tenantData.tenancy ? (
-            <TenantView
-              user={user}
-              data={tenantData as TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> }}
-              paymentForm={paymentForm}
-              setPaymentForm={setPaymentForm}
-              onSubmit={handleTenantPayment}
-              busy={busy}
-            />
-          ) : (
-            <TenantWelcome user={user} />
-          )
-        ) : null}
-
-        {showRolePicker && user ? (
-          <RolePicker onSelect={handleRoleSelect} busy={busy} />
-        ) : null}
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+function ThemeToggle() {
+  const { t, s, toggle } = useT();
+  return (
+    <Pressable
+      onPress={toggle}
+      style={({ pressed }) => [s.themeToggle, pressed && { opacity: 0.7, transform: [{ scale: 0.92 }] }]}
+    >
+      <Text style={s.themeToggleIcon}>{t.mode === "dark" ? "☀️" : "🌙"}</Text>
+    </Pressable>
   );
 }
 
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
+  const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
   const [activeForm, setActiveForm] = useState<FormType>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
 
-  // Building form
   const [bName, setBName] = useState("");
   const [bAddress, setBAddress] = useState("");
-  // Unit form
   const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(null);
   const [uLabel, setULabel] = useState("");
   const [uRent, setURent] = useState("");
-  // Bank form
   const [bankName, setBankName] = useState("");
   const [accName, setAccName] = useState("");
   const [accNumber, setAccNumber] = useState("");
   const [ifsc, setIfsc] = useState("");
-  // Tenancy form
   const [tenantIdentifier, setTenantIdentifier] = useState("");
   const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
 
@@ -546,7 +1199,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   }
 
   const unoccupiedUnits = data.units.filter(
-    (u) => !data.tenants.some((t) => t.unit_label === u.label && t.building_name === u.building_name),
+    (u) => !data.tenants.some((tt) => tt.unit_label === u.label && tt.building_name === u.building_name),
   );
 
   return (
@@ -598,7 +1251,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           </View>
         )}
 
-        {/* Unit form — pick building visually */}
+        {/* Unit form */}
         {activeForm === "unit" && (
           <View style={styles.inlineForm}>
             <Text style={styles.inlineFormTitle}>New unit</Text>
@@ -660,7 +1313,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           </View>
         )}
 
-        {/* Assign tenant — pick unit visually */}
+        {/* Assign tenant */}
         {activeForm === "tenancy" && (
           <View style={styles.inlineForm}>
             <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
@@ -719,32 +1372,32 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         ) : (
           <View style={styles.tableLike}>
             {data.tenants.map((tenant) => (
-            <View key={tenant.id} style={styles.tableRow}>
-              <View style={styles.tableMain}>
-                <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
-                <Text style={styles.rowMeta}>
-                  {tenant.building_name} / {tenant.unit_label} • <Text style={{ fontWeight: "700", color: "#6e2d19" }}>{tenant.tenant_code}</Text>
-                </Text>
+              <View key={tenant.id} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
+                  <Text style={styles.rowMeta}>
+                    {tenant.building_name} / {tenant.unit_label} • <Text style={{ fontWeight: "700", color: t.accent }}>{tenant.tenant_code}</Text>
+                  </Text>
+                </View>
+                <View style={styles.tableNumbers}>
+                  <Text style={styles.rowValue}>{money(tenant.paid_this_month)}</Text>
+                  <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
+                </View>
+                <StatusBadge status={tenant.status} />
+                <Pressable
+                  style={styles.removeButton}
+                  onPress={async () => {
+                    try {
+                      await endTenancy(token, tenant.id);
+                      onRefresh();
+                    } catch (e) { /* ignore */ }
+                  }}
+                >
+                  <Text style={styles.removeButtonText}>Remove</Text>
+                </Pressable>
               </View>
-              <View style={styles.tableNumbers}>
-                <Text style={styles.rowValue}>{money(tenant.paid_this_month)}</Text>
-                <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
-              </View>
-              <StatusBadge status={tenant.status} />
-              <Pressable
-                style={styles.removeButton}
-                onPress={async () => {
-                  try {
-                    await endTenancy(token, tenant.id);
-                    onRefresh();
-                  } catch (e) { /* ignore */ }
-                }}
-              >
-                <Text style={styles.removeButtonText}>Remove</Text>
-              </Pressable>
-            </View>
-          ))}
-        </View>
+            ))}
+          </View>
         )}
       </View>
 
@@ -788,6 +1441,7 @@ function TenantView({
   onSubmit: () => void;
   busy: boolean;
 }) {
+  const { s: styles } = useT();
   return (
     <View style={styles.stack}>
       <View style={styles.summaryGrid}>
@@ -832,23 +1486,23 @@ function TenantView({
         {data.payments.length === 0 ? (
           <Text style={styles.helper}>No payments yet.</Text>
         ) : (
-        <View style={styles.tableLike}>
-          {data.payments.map((payment) => (
-            <View key={payment.id} style={styles.tableRow}>
-              <View style={styles.tableMain}>
-                <Text style={styles.rowTitle}>{payment.rent_month}</Text>
-                <Text style={styles.rowMeta}>
-                  {payment.bank_name} ({payment.account_number})
-                </Text>
+          <View style={styles.tableLike}>
+            {data.payments.map((payment) => (
+              <View key={payment.id} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{payment.rent_month}</Text>
+                  <Text style={styles.rowMeta}>
+                    {payment.bank_name} ({payment.account_number})
+                  </Text>
+                </View>
+                <View style={styles.tableNumbers}>
+                  <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                  <Text style={styles.rowMeta}>{payment.paid_on}</Text>
+                </View>
+                <StatusBadge status={payment.status} />
               </View>
-              <View style={styles.tableNumbers}>
-                <Text style={styles.rowValue}>{money(payment.amount)}</Text>
-                <Text style={styles.rowMeta}>{payment.paid_on}</Text>
-              </View>
-              <StatusBadge status={payment.status} />
-            </View>
-          ))}
-        </View>
+            ))}
+          </View>
         )}
       </View>
     </View>
@@ -856,6 +1510,7 @@ function TenantView({
 }
 
 function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant") => void; busy: boolean }) {
+  const { s: styles } = useT();
   return (
     <View style={styles.panel}>
       <Text style={styles.sectionKicker}>Welcome</Text>
@@ -890,6 +1545,7 @@ function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant"
 }
 
 function TenantWelcome({ user }: { user: AuthUser }) {
+  const { t, s: styles } = useT();
   return (
     <View style={styles.panel}>
       <Text style={styles.sectionKicker}>Almost there</Text>
@@ -900,7 +1556,7 @@ function TenantWelcome({ user }: { user: AuthUser }) {
 
       <View style={[styles.summaryCard, { alignItems: "center", paddingVertical: 20 }]}>
         <Text style={styles.summaryLabel}>Your Tenant Code</Text>
-        <Text style={{ fontSize: 28, fontWeight: "800", letterSpacing: 2, color: "#6e2d19", marginTop: 8 }}>
+        <Text style={{ fontSize: 28, fontWeight: "800", letterSpacing: 2, color: t.accent, marginTop: 8 }}>
           {user.tenant_code}
         </Text>
         <Text style={[styles.helper, { marginTop: 6, textAlign: "center" }]}>
@@ -925,6 +1581,7 @@ function Field(props: {
   secureTextEntry?: boolean;
   keyboardType?: "default" | "numeric";
 }) {
+  const { t, s: styles } = useT();
   return (
     <View style={styles.field}>
       <Text style={styles.fieldLabel}>{props.label}</Text>
@@ -935,6 +1592,7 @@ function Field(props: {
         secureTextEntry={props.secureTextEntry}
         keyboardType={props.keyboardType}
         autoCapitalize="none"
+        placeholderTextColor={t.textSecondary}
       />
     </View>
   );
@@ -946,13 +1604,13 @@ function Field(props: {
 type NominatimResult = { place_id: number; display_name: string; lat: string; lon: string };
 
 function AddressSearch({ value, onSelect }: { value: string; onSelect: (address: string) => void }) {
+  const { t, s: styles } = useT();
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<NominatimResult[]>([]);
   const [open, setOpen] = useState(false);
   const [locating, setLocating] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep local query in sync when parent value changes (e.g. form reset)
   useEffect(() => { setQuery(value); }, [value]);
 
   const search = useCallback(async (text: string) => {
@@ -968,7 +1626,7 @@ function AddressSearch({ value, onSelect }: { value: string; onSelect: (address:
 
   function handleChangeText(text: string) {
     setQuery(text);
-    onSelect(text); // keep parent in sync for manual typing
+    onSelect(text);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => search(text), 400);
   }
@@ -1013,7 +1671,7 @@ function AddressSearch({ value, onSelect }: { value: string; onSelect: (address:
           value={query}
           onChangeText={handleChangeText}
           placeholder="Search address or area..."
-          placeholderTextColor="#a09585"
+          placeholderTextColor={t.textSecondary}
           autoCapitalize="none"
         />
         {open && results.length > 0 && (
@@ -1040,6 +1698,7 @@ function AddressSearch({ value, onSelect }: { value: string; onSelect: (address:
 }
 
 function SummaryCard({ label, value, note }: { label: string; value: string; note: string }) {
+  const { s: styles } = useT();
   return (
     <View style={styles.summaryCard}>
       <Text style={styles.summaryLabel}>{label}</Text>
@@ -1050,6 +1709,7 @@ function SummaryCard({ label, value, note }: { label: string; value: string; not
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const { s: styles } = useT();
   const tone =
     status === "paid" || status === "succeeded"
       ? styles.goodBadge
@@ -1076,6 +1736,7 @@ function PrimaryButton({
   variant?: "primary" | "secondary" | "google";
   fullWidth?: boolean;
 }) {
+  const { s: styles } = useT();
   const variantStyle =
     variant === "google"
       ? styles.googleButton
@@ -1090,7 +1751,13 @@ function PrimaryButton({
         : styles.buttonText;
   return (
     <Pressable
-      style={[styles.button, variantStyle, fullWidth && { alignSelf: "stretch" as const }, disabled && styles.disabledButton]}
+      style={({ pressed }) => [
+        styles.button,
+        variantStyle,
+        fullWidth && { alignSelf: "stretch" as const },
+        disabled && styles.disabledButton,
+        pressed && !disabled && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+      ]}
       onPress={onPress}
       disabled={disabled}
     >
@@ -1100,6 +1767,7 @@ function PrimaryButton({
 }
 
 function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; label: string; active: boolean; onPress: () => void; disabled?: boolean }) {
+  const { s: styles } = useT();
   return (
     <Pressable
       style={[styles.actionChip, active && styles.actionChipActive, disabled && styles.disabledButton]}
@@ -1112,13 +1780,11 @@ function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; 
   );
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
 function readError(error: unknown) {
-  if (error instanceof ApiError) {
-    return error.message;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
+  if (error instanceof ApiError) return error.message;
+  if (error instanceof Error) return error.message;
   return "Something went wrong.";
 }
 
@@ -1126,446 +1792,3 @@ function money(value: string | number) {
   const amount = Number(value || 0);
   return `INR ${amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#f4efe4",
-  },
-  pageOuter: {
-    alignItems: "center",
-    paddingVertical: 24,
-    paddingHorizontal: 16,
-  },
-  pageInner: {
-    width: "100%",
-    maxWidth: 520,
-    gap: 18,
-  },
-  hero: {
-    gap: 16,
-    padding: 24,
-    borderRadius: 20,
-    backgroundColor: "#fff8ef",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.12)",
-  },
-  eyebrow: {
-    color: "#6e2d19",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 1.4,
-    textTransform: "uppercase",
-    marginBottom: 8,
-  },
-  title: {
-    fontSize: 42,
-    fontWeight: "900",
-    color: "#1e1a17",
-  },
-  subtitle: {
-    color: "#74695c",
-    fontSize: 16,
-    lineHeight: 24,
-    marginTop: 8,
-  },
-  note: {
-    marginTop: 10,
-    color: "#a35f00",
-    fontSize: 13,
-  },
-  roleCard: {
-    padding: 16,
-    borderRadius: 20,
-    backgroundColor: "#f2e0d4",
-    gap: 6,
-  },
-  roleTitle: {
-    fontWeight: "800",
-    color: "#6e2d19",
-    fontSize: 12,
-  },
-  roleText: {
-    color: "#433123",
-  },
-  panel: {
-    backgroundColor: "rgba(255,250,242,0.86)",
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.12)",
-    padding: 20,
-    gap: 16,
-  },
-  sectionKicker: {
-    color: "#6e2d19",
-    fontSize: 12,
-    fontWeight: "800",
-    textTransform: "uppercase",
-    letterSpacing: 1.3,
-  },
-  panelTitle: {
-    fontSize: 24,
-    fontWeight: "800",
-    color: "#1e1a17",
-  },
-  formGrid: {
-    gap: 12,
-  },
-  field: {
-    gap: 8,
-  },
-  fieldLabel: {
-    fontWeight: "700",
-    color: "#433123",
-  },
-  input: {
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.18)",
-    backgroundColor: "#fff",
-    fontSize: 15,
-  },
-  button: {
-    paddingVertical: 14,
-    paddingHorizontal: 28,
-    borderRadius: 12,
-    alignItems: "center",
-    alignSelf: "flex-start",
-  },
-  primaryButton: {
-    backgroundColor: "#b85c38",
-  },
-  secondaryButton: {
-    backgroundColor: "rgba(110,45,25,0.1)",
-  },
-  googleButton: {
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.18)",
-  },
-  buttonText: {
-    color: "#fff8f3",
-    fontWeight: "800",
-  },
-  secondaryButtonText: {
-    color: "#6e2d19",
-  },
-  googleButtonText: {
-    color: "#433123",
-    fontWeight: "800",
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  sessionBar: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-    padding: 14,
-    paddingHorizontal: 18,
-    borderRadius: 14,
-    backgroundColor: "#fff8ef",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.08)",
-  },
-  sessionText: {
-    color: "#433123",
-    fontWeight: "700",
-  },
-  banner: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    padding: 14,
-    borderRadius: 18,
-    backgroundColor: "#f2e0d4",
-  },
-  bannerBusy: {
-    backgroundColor: "#f6eadc",
-  },
-  bannerText: {
-    flex: 1,
-    color: "#433123",
-  },
-  stack: {
-    gap: 18,
-  },
-  summaryGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
-  },
-  summaryCard: {
-    flex: 1,
-    minWidth: 140,
-    padding: 18,
-    borderRadius: 22,
-    backgroundColor: "rgba(255,250,242,0.86)",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.12)",
-  },
-  summaryLabel: {
-    color: "#6e2d19",
-    fontSize: 12,
-    fontWeight: "800",
-    textTransform: "uppercase",
-  },
-  summaryValue: {
-    color: "#1e1a17",
-    fontSize: 26,
-    fontWeight: "900",
-    marginTop: 10,
-  },
-  summaryNote: {
-    color: "#74695c",
-    marginTop: 8,
-  },
-  tableLike: {
-    gap: 12,
-  },
-  tableRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    padding: 14,
-    borderRadius: 18,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.08)",
-    gap: 10,
-  },
-  tableMain: {
-    flex: 1,
-    minWidth: 120,
-    gap: 4,
-  },
-  tableNumbers: {
-    alignItems: "flex-end",
-    gap: 4,
-  },
-  rowTitle: {
-    color: "#1e1a17",
-    fontWeight: "800",
-    fontSize: 16,
-  },
-  rowMeta: {
-    color: "#74695c",
-  },
-  rowValue: {
-    color: "#1e1a17",
-    fontWeight: "800",
-  },
-  badge: {
-    alignSelf: "flex-start",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  goodBadge: {
-    backgroundColor: "rgba(28,124,84,0.12)",
-  },
-  neutralBadge: {
-    backgroundColor: "rgba(90,81,71,0.12)",
-  },
-  warnBadge: {
-    backgroundColor: "rgba(163,95,0,0.12)",
-  },
-  badgeText: {
-    textTransform: "capitalize",
-    color: "#433123",
-    fontWeight: "800",
-  },
-  removeButton: {
-    alignSelf: "flex-start",
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: "rgba(180,40,40,0.1)",
-  },
-  removeButtonText: {
-    color: "#b42828",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  helper: {
-    color: "#74695c",
-    lineHeight: 20,
-  },
-  authTabs: {
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 4,
-  },
-  authTab: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 999,
-    backgroundColor: "rgba(110,45,25,0.06)",
-  },
-  authTabActive: {
-    backgroundColor: "#b85c38",
-  },
-  authTabText: {
-    fontWeight: "800",
-    color: "#6e2d19",
-  },
-  authTabTextActive: {
-    color: "#fff",
-  },
-  roleToggle: {
-    gap: 8,
-    marginBottom: 4,
-  },
-  roleOptions: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  roleOption: {
-    flex: 1,
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-    borderRadius: 14,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.18)",
-    backgroundColor: "#fff",
-  },
-  roleOptionActive: {
-    backgroundColor: "#b85c38",
-    borderColor: "#b85c38",
-  },
-  roleOptionText: {
-    fontWeight: "700",
-    color: "#433123",
-  },
-  roleOptionTextActive: {
-    color: "#fff",
-  },
-  divider: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: "rgba(67,49,35,0.12)",
-  },
-  dividerText: {
-    color: "#74695c",
-    fontWeight: "700",
-    fontSize: 13,
-  },
-  actionChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.18)",
-    backgroundColor: "#fff",
-  },
-  actionChipActive: {
-    backgroundColor: "#b85c38",
-    borderColor: "#b85c38",
-  },
-  actionChipText: {
-    fontWeight: "700",
-    color: "#433123",
-    fontSize: 14,
-  },
-  actionChipTextActive: {
-    color: "#fff",
-  },
-  selectChip: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.18)",
-    backgroundColor: "#fff",
-  },
-  selectChipActive: {
-    backgroundColor: "#b85c38",
-    borderColor: "#b85c38",
-  },
-  selectChipText: {
-    fontWeight: "700",
-    color: "#433123",
-    fontSize: 14,
-  },
-  selectChipTextActive: {
-    color: "#fff",
-  },
-  inlineForm: {
-    gap: 12,
-    padding: 16,
-    borderRadius: 18,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.08)",
-  },
-  inlineFormTitle: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#1e1a17",
-  },
-  addressDropdown: {
-    position: "absolute",
-    top: "100%",
-    left: 0,
-    right: 0,
-    zIndex: 50,
-    marginTop: 4,
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(67,49,35,0.12)",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 6,
-    overflow: "hidden",
-  },
-  addressItem: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(67,49,35,0.06)",
-  },
-  addressItemIcon: {
-    fontSize: 14,
-    marginTop: 2,
-  },
-  addressItemText: {
-    flex: 1,
-    fontSize: 13,
-    color: "#433123",
-    lineHeight: 18,
-  },
-  locationButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    alignSelf: "flex-start",
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: "rgba(110,45,25,0.06)",
-    marginTop: 2,
-  },
-  locationButtonText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#6e2d19",
-  },
-});
