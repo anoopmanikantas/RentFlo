@@ -3,79 +3,178 @@ import os
 import uuid
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from django.conf import settings
 
 
-class JuspayClientError(Exception):
+# ---------------------------------------------------------------------------
+# Google ID-token verification
+# ---------------------------------------------------------------------------
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+
+
+def verify_google_id_token(id_token: str) -> dict:
+    """
+    Verify a Google Sign-In *id_token* using Google's tokeninfo endpoint.
+    Returns the decoded payload dict with at least 'email', 'given_name',
+    'family_name' on success; raises ValueError on failure.
+    """
+    url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+    try:
+        with urlopen(url, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (HTTPError, URLError) as exc:
+        raise ValueError(f"Google token verification failed: {exc}") from exc
+
+    # Verify the audience matches our client id (if configured)
+    if GOOGLE_CLIENT_ID and payload.get("aud") != GOOGLE_CLIENT_ID:
+        raise ValueError("Token audience mismatch.")
+
+    if not payload.get("email"):
+        raise ValueError("Google token did not contain an email.")
+
+    if payload.get("email_verified") == "false":
+        raise ValueError("Google account email is not verified.")
+
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Razorpay payment client  (UPI = 0% MDR, Cards ~2%)
+# ---------------------------------------------------------------------------
+
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+
+class RazorpayClientError(Exception):
     pass
 
 
-class JuspayClient:
+class RazorpayClient:
     """
-    Dev-friendly wrapper around Juspay order/session creation.
-    In production, set:
-    - JUSPAY_BASE_URL
-    - JUSPAY_API_KEY
-    - JUSPAY_MERCHANT_ID
+    Thin wrapper around Razorpay Orders API.
+    Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to go live.
+    Without them, a mock payload is returned so the app remains testable.
     """
 
+    API_BASE = "https://api.razorpay.com/v1"
+
     def __init__(self):
-        self.base_url = os.environ.get("JUSPAY_BASE_URL", "").rstrip("/")
-        self.api_key = os.environ.get("JUSPAY_API_KEY", "")
-        self.merchant_id = os.environ.get("JUSPAY_MERCHANT_ID", "")
+        self.key_id = RAZORPAY_KEY_ID
+        self.key_secret = RAZORPAY_KEY_SECRET
 
     @property
     def configured(self):
-        return bool(self.base_url and self.api_key and self.merchant_id)
+        return bool(self.key_id and self.key_secret)
 
-    def create_order_session(self, *, order_id: str, amount: Decimal, customer_id: str, customer_email: str):
+    def _auth_header(self) -> str:
+        import base64
+        creds = f"{self.key_id}:{self.key_secret}"
+        return "Basic " + base64.b64encode(creds.encode()).decode()
+
+    # ---- Create order ------------------------------------------------
+    def create_order(self, *, order_id: str, amount: Decimal, currency: str = "INR",
+                     customer_email: str = "", customer_name: str = "") -> dict:
+        """
+        Create a Razorpay Order. `amount` must be in major currency units
+        (rupees); Razorpay expects *paise*, so we convert here.
+        """
         if not self.configured:
+            mock_rzp_order_id = f"order_mock_{uuid.uuid4().hex[:16]}"
             return {
-                "provider": "juspay",
+                "provider": "razorpay",
                 "mode": "mock",
                 "order_id": order_id,
-                "juspay_order_id": f"mock_{order_id}",
-                "payment_session_id": f"mock_session_{uuid.uuid4().hex}",
+                "razorpay_order_id": mock_rzp_order_id,
                 "sdk_payload": {
-                    "order_id": order_id,
-                    "payment_session_id": f"mock_session_{uuid.uuid4().hex}",
-                    "merchant_id": "mock_merchant",
-                    "environment": "sandbox",
+                    "key": "rzp_test_mock",
+                    "amount": int(amount * 100),
+                    "currency": currency,
+                    "name": "RentFlo",
+                    "description": f"Rent payment {order_id}",
+                    "order_id": mock_rzp_order_id,
+                    "prefill": {"email": customer_email, "contact": ""},
+                    "theme": {"color": "#b85c38"},
                 },
             }
 
-        payload = {
-            "order_id": order_id,
-            "amount": str(amount),
-            "currency": "INR",
-            "customer_id": customer_id,
-            "customer_email": customer_email,
-            "merchant_id": self.merchant_id,
-            "return_url": getattr(settings, "JUSPAY_RETURN_URL", ""),
-        }
+        payload = json.dumps({
+            "amount": int(amount * 100),  # paise
+            "currency": currency,
+            "receipt": order_id,
+            "notes": {"internal_order_id": order_id},
+        }).encode("utf-8")
+
         req = Request(
-            f"{self.base_url}/orders",
-            data=json.dumps(payload).encode("utf-8"),
+            f"{self.API_BASE}/orders",
+            data=payload,
             headers={
-                "Authorization": self.api_key,
+                "Authorization": self._auth_header(),
                 "Content-Type": "application/json",
-                "x-merchantid": self.merchant_id,
             },
             method="POST",
         )
         try:
-            with urlopen(req, timeout=20) as response:
-                body = json.loads(response.read().decode("utf-8"))
+            with urlopen(req, timeout=20) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
         except (HTTPError, URLError) as exc:
-            raise JuspayClientError(str(exc)) from exc
+            raise RazorpayClientError(str(exc)) from exc
 
+        rzp_order_id = body["id"]
         return {
-            "provider": "juspay",
+            "provider": "razorpay",
             "mode": "live",
             "order_id": order_id,
-            "juspay_order_id": body.get("order_id", order_id),
-            "payment_session_id": body.get("payment_session_id", ""),
-            "sdk_payload": body,
+            "razorpay_order_id": rzp_order_id,
+            "sdk_payload": {
+                "key": self.key_id,
+                "amount": body["amount"],
+                "currency": body["currency"],
+                "name": "RentFlo",
+                "description": f"Rent payment {order_id}",
+                "order_id": rzp_order_id,
+                "prefill": {"email": customer_email, "contact": ""},
+                "theme": {"color": "#b85c38"},
+            },
         }
+
+    # ---- Verify payment signature ------------------------------------
+    def verify_payment_signature(self, *, razorpay_order_id: str,
+                                 razorpay_payment_id: str,
+                                 razorpay_signature: str) -> bool:
+        """
+        HMAC-SHA256 verification as per Razorpay docs.
+        Returns True if the signature is valid.
+        """
+        if not self.configured:
+            return True  # mock mode always passes
+
+        import hmac
+        import hashlib
+        message = f"{razorpay_order_id}|{razorpay_payment_id}"
+        expected = hmac.new(
+            self.key_secret.encode(),
+            message.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, razorpay_signature)
+
+    # ---- Fetch payment details ---------------------------------------
+    def fetch_payment(self, payment_id: str) -> dict:
+        if not self.configured:
+            return {"id": payment_id, "status": "captured", "method": "upi", "mode": "mock"}
+
+        req = Request(
+            f"{self.API_BASE}/payments/{payment_id}",
+            headers={"Authorization": self._auth_header()},
+            method="GET",
+        )
+        try:
+            with urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (HTTPError, URLError) as exc:
+            raise RazorpayClientError(str(exc)) from exc

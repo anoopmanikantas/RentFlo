@@ -14,13 +14,15 @@ from .serializers import (
     BankAccountSerializer,
     BuildingSerializer,
     ConfirmPaymentSerializer,
+    GoogleLoginSerializer,
     InitiatePaymentSerializer,
     PaymentSerializer,
+    SignupSerializer,
     TenantSummarySerializer,
     UnitSerializer,
     UserSerializer,
 )
-from .services import JuspayClient, JuspayClientError
+from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
 
 
 def current_month():
@@ -39,6 +41,54 @@ class LoginView(APIView):
         serializer = AuthLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({"token": token.key, "user": UserSerializer(user).data})
+
+
+class SignupView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = SignupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response(
+            {"token": token.key, "user": UserSerializer(user).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class GoogleLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = GoogleLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            google_info = verify_google_id_token(serializer.validated_data["id_token"])
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = google_info["email"]
+        user = User.objects.filter(email=email).first()
+        if not user:
+            username = email.split("@")[0]
+            base = username
+            n = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base}{n}"
+                n += 1
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                first_name=google_info.get("given_name", ""),
+                last_name=google_info.get("family_name", ""),
+                role=User.Role.TENANT,
+            )
+            user.set_unusable_password()
+            user.save()
+
         token, _ = Token.objects.get_or_create(user=user)
         return Response({"token": token.key, "user": UserSerializer(user).data})
 
@@ -161,22 +211,22 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
             status=JuspayOrder.Status.CREATED,
         )
 
-        client = JuspayClient()
+        client = RazorpayClient()
         try:
-            remote = client.create_order_session(
+            remote = client.create_order(
                 order_id=order.order_id,
                 amount=order.amount,
-                customer_id=str(request.user.id),
                 customer_email=request.user.email,
+                customer_name=request.user.get_full_name(),
             )
-        except JuspayClientError as exc:
+        except RazorpayClientError as exc:
             order.status = JuspayOrder.Status.FAILED
             order.metadata = {"error": str(exc)}
             order.save(update_fields=["status", "metadata", "updated_at"])
-            return Response({"detail": "Unable to create Juspay order.", "error": str(exc)}, status=502)
+            return Response({"detail": "Unable to create Razorpay order.", "error": str(exc)}, status=502)
 
-        order.juspay_order_id = remote.get("juspay_order_id", "")
-        order.payment_session_id = remote.get("payment_session_id", "")
+        order.juspay_order_id = remote.get("razorpay_order_id", "")
+        order.payment_session_id = ""  # not used by Razorpay
         order.metadata = remote.get("sdk_payload", {})
         order.status = JuspayOrder.Status.PENDING
         order.save(update_fields=["juspay_order_id", "payment_session_id", "metadata", "status", "updated_at"])
@@ -190,7 +240,8 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
             amount=order.amount,
             paid_on=date.today(),
             status=Payment.Status.INITIATED,
-            provider_order_id=order.juspay_order_id or order.order_id,
+            provider="razorpay",
+            provider_order_id=remote.get("razorpay_order_id", order.order_id),
             provider_payload=remote.get("sdk_payload", {}),
             juspay_order=order,
         )
@@ -200,7 +251,8 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
                 "order_id": order.order_id,
                 "payment_id": payment.id,
                 "mode": remote["mode"],
-                "provider": "juspay",
+                "provider": "razorpay",
+                "razorpay_order_id": remote.get("razorpay_order_id", ""),
                 "sdk_payload": remote["sdk_payload"],
             },
             status=status.HTTP_201_CREATED,
@@ -223,19 +275,56 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
         if not order:
             return Response({"detail": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        order.status = serializer.validated_data["status"]
-        order.metadata = serializer.validated_data.get("provider_payload", order.metadata)
+        client = RazorpayClient()
+        resolved_status = serializer.validated_data["status"]
+        provider_payment_id = serializer.validated_data.get("provider_payment_id", "")
+        razorpay_signature = serializer.validated_data.get("razorpay_signature", "")
+        provider_payload = serializer.validated_data.get("provider_payload", {})
+
+        # Server-side signature verification with Razorpay
+        if client.configured and provider_payment_id and razorpay_signature:
+            sig_valid = client.verify_payment_signature(
+                razorpay_order_id=order.juspay_order_id,  # stores razorpay_order_id
+                razorpay_payment_id=provider_payment_id,
+                razorpay_signature=razorpay_signature,
+            )
+            if sig_valid:
+                resolved_status = JuspayOrder.Status.SUCCEEDED
+                # Fetch full payment details for the record
+                try:
+                    provider_payload = client.fetch_payment(provider_payment_id)
+                except RazorpayClientError:
+                    pass
+            else:
+                resolved_status = JuspayOrder.Status.FAILED
+        elif client.configured and provider_payment_id:
+            # No signature supplied: fetch payment status directly
+            try:
+                remote = client.fetch_payment(provider_payment_id)
+                provider_payload = remote
+                rzp_status = remote.get("status", "")
+                if rzp_status == "captured":
+                    resolved_status = JuspayOrder.Status.SUCCEEDED
+                elif rzp_status in ("failed", "refunded"):
+                    resolved_status = JuspayOrder.Status.FAILED
+                else:
+                    resolved_status = JuspayOrder.Status.PENDING
+            except RazorpayClientError:
+                pass
+
+        order.status = resolved_status
+        order.metadata = provider_payload or order.metadata
         order.save(update_fields=["status", "metadata", "updated_at"])
 
         payment = Payment.objects.filter(juspay_order=order, tenancy=tenancy).first()
         if payment:
             payment.status = (
                 Payment.Status.SUCCEEDED
-                if serializer.validated_data["status"] == JuspayOrder.Status.SUCCEEDED
+                if resolved_status == JuspayOrder.Status.SUCCEEDED
                 else Payment.Status.FAILED
             )
-            payment.provider_payment_id = serializer.validated_data.get("provider_payment_id", "")
-            payment.provider_payload = serializer.validated_data.get("provider_payload", payment.provider_payload)
+            payment.provider_payment_id = provider_payment_id
+            payment.provider_payload = provider_payload or payment.provider_payload
             payment.save(update_fields=["status", "provider_payment_id", "provider_payload", "updated_at"])
 
         return Response({"detail": "Payment status updated."})

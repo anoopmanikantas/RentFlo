@@ -26,6 +26,37 @@ class AuthLoginSerializer(serializers.Serializer):
         return attrs
 
 
+class SignupSerializer(serializers.Serializer):
+    username = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=6)
+    first_name = serializers.CharField(max_length=150, required=False, default="")
+    last_name = serializers.CharField(max_length=150, required=False, default="")
+    phone = serializers.CharField(max_length=32, required=False, default="")
+    role = serializers.ChoiceField(choices=User.Role.choices)
+
+    def validate_username(self, value):
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("Username already taken.")
+        return value
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Email already registered.")
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+
+class GoogleLoginSerializer(serializers.Serializer):
+    id_token = serializers.CharField()
+
+
 class AuthResponseSerializer(serializers.Serializer):
     token = serializers.CharField()
     user = UserSerializer()
@@ -163,5 +194,6 @@ class ConfirmPaymentSerializer(serializers.Serializer):
     order_id = serializers.CharField()
     status = serializers.ChoiceField(choices=JuspayOrder.Status.choices)
     provider_payment_id = serializers.CharField(required=False, allow_blank=True)
+    razorpay_signature = serializers.CharField(required=False, allow_blank=True)
     provider_payload = serializers.JSONField(required=False)
 

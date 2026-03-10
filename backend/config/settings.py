@@ -1,8 +1,12 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env from the repo root (one level above backend/)
+load_dotenv(BASE_DIR.parent / ".env")
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
@@ -84,4 +88,10 @@ REST_FRAMEWORK = {
     ],
 }
 
-JUSPAY_RETURN_URL = os.environ.get("JUSPAY_RETURN_URL", "http://localhost:8081/payment-result")
+# Razorpay  (UPI = 0% MDR, Cards ~2%)
+# Get free test keys at https://dashboard.razorpay.com/app/keys
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+# Google OAuth
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")

@@ -90,7 +90,8 @@ export type InitiatedPayment = {
   order_id: string;
   payment_id: number;
   mode: "mock" | "live";
-  provider: "juspay";
+  provider: "razorpay";
+  razorpay_order_id: string;
   sdk_payload: Record<string, unknown>;
 };
 
@@ -98,6 +99,7 @@ export type ConfirmPaymentInput = {
   order_id: string;
   status: "succeeded" | "failed";
   provider_payment_id?: string;
+  razorpay_signature?: string;
   provider_payload?: Record<string, unknown>;
 };
 
@@ -122,6 +124,30 @@ export function login(username: string, password: string) {
   return request<AuthResponse>("/auth/login/", {
     method: "POST",
     body: JSON.stringify({ username, password }),
+  });
+}
+
+export type SignupInput = {
+  username: string;
+  email: string;
+  password: string;
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
+  role: "landlord" | "tenant";
+};
+
+export function signup(data: SignupInput) {
+  return request<AuthResponse>("/auth/signup/", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export function googleLogin(idToken: string) {
+  return request<AuthResponse>("/auth/google/", {
+    method: "POST",
+    body: JSON.stringify({ id_token: idToken }),
   });
 }
 

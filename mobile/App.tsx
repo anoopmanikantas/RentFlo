@@ -18,14 +18,17 @@ import {
   confirmTenantPayment,
   fetchLandlordDashboard,
   fetchTenantDashboard,
+  googleLogin,
   login,
+  signup,
   type AuthUser,
   type InitiatePaymentInput,
+  type SignupInput,
   initiateTenantPayment,
   type LandlordDashboard,
   type TenantDashboard,
 } from "./src/api";
-import { launchJuspayPayment } from "./src/juspay";
+import { launchRazorpayPayment } from "./src/razorpay";
 
 const initialPaymentForm: InitiatePaymentInput = {
   bank_account_id: 0,
@@ -34,15 +37,25 @@ const initialPaymentForm: InitiatePaymentInput = {
 };
 
 export default function App() {
+  const [authScreen, setAuthScreen] = useState<"login" | "signup">("login");
   const [username, setUsername] = useState("owner");
   const [password, setPassword] = useState("owner123");
+  // Signup fields
+  const [signupUsername, setSignupUsername] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupFirstName, setSignupFirstName] = useState("");
+  const [signupLastName, setSignupLastName] = useState("");
+  const [signupPhone, setSignupPhone] = useState("");
+  const [signupRole, setSignupRole] = useState<"landlord" | "tenant">("tenant");
+
   const [token, setToken] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [landlordData, setLandlordData] = useState<LandlordDashboard | null>(null);
   const [tenantData, setTenantData] = useState<TenantDashboard | null>(null);
   const [paymentForm, setPaymentForm] = useState<InitiatePaymentInput>(initialPaymentForm);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("Use the demo landlord or tenant credentials to sign in.");
+  const [message, setMessage] = useState("Sign in with your account, create one, or continue with Google.");
   const [isInitialized, setIsInitialized] = useState(false);
 
   // Load token and user from persistent storage on app startup
@@ -141,6 +154,109 @@ export default function App() {
     }
   }
 
+  async function handleSignup() {
+    setBusy(true);
+    setMessage("Creating account...");
+    try {
+      const data: SignupInput = {
+        username: signupUsername,
+        email: signupEmail,
+        password: signupPassword,
+        first_name: signupFirstName,
+        last_name: signupLastName,
+        phone: signupPhone,
+        role: signupRole,
+      };
+      const auth = await signup(data);
+      startTransition(() => {
+        setToken(auth.token);
+        setUser(auth.user);
+      });
+      setMessage(`Account created! Signed in as ${auth.user.role}.`);
+    } catch (error) {
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleGoogleLogin() {
+    setBusy(true);
+    setMessage("Signing in with Google...");
+    try {
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        const googleClientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID || "";
+        if (!googleClientId) {
+          setMessage("Set EXPO_PUBLIC_GOOGLE_CLIENT_ID to enable Google Sign-In.");
+          setBusy(false);
+          return;
+        }
+        // Use Google's GSI (Sign In With Google) JavaScript API
+        const idToken = await new Promise<string>((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "https://accounts.google.com/gsi/client";
+          script.onload = () => {
+            (window as any).google.accounts.id.initialize({
+              client_id: googleClientId,
+              callback: (response: any) => {
+                if (response.credential) {
+                  resolve(response.credential);
+                } else {
+                  reject(new Error("Google Sign-In returned no credential."));
+                }
+              },
+            });
+            (window as any).google.accounts.id.prompt((notification: any) => {
+              if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+                // Fallback: render a temporary button
+                const container = document.createElement("div");
+                container.id = "g_id_signin_tmp";
+                container.style.position = "fixed";
+                container.style.top = "50%";
+                container.style.left = "50%";
+                container.style.transform = "translate(-50%, -50%)";
+                container.style.zIndex = "10000";
+                container.style.background = "#fff";
+                container.style.padding = "24px";
+                container.style.borderRadius = "16px";
+                container.style.boxShadow = "0 4px 24px rgba(0,0,0,0.15)";
+                document.body.appendChild(container);
+                (window as any).google.accounts.id.renderButton(container, {
+                  theme: "outline",
+                  size: "large",
+                  text: "continue_with",
+                  width: 300,
+                });
+                // Cleanup after 60s
+                setTimeout(() => {
+                  container.remove();
+                  reject(new Error("Google Sign-In timed out."));
+                }, 60000);
+              }
+            });
+          };
+          script.onerror = () => reject(new Error("Failed to load Google Sign-In SDK."));
+          document.head.appendChild(script);
+        });
+        const auth = await googleLogin(idToken);
+        // Clean up any leftover prompt container
+        document.getElementById("g_id_signin_tmp")?.remove();
+        startTransition(() => {
+          setToken(auth.token);
+          setUser(auth.user);
+        });
+        setMessage(`Signed in with Google as ${auth.user.role}.`);
+      } else {
+        setMessage("Google Sign-In on native requires Expo AuthSession setup. Use web for now.");
+      }
+    } catch (error) {
+      document.getElementById("g_id_signin_tmp")?.remove();
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function logout() {
     setToken("");
     setUser(null);
@@ -148,6 +264,14 @@ export default function App() {
     setTenantData(null);
     setUsername("owner");
     setPassword("owner123");
+    setSignupUsername("");
+    setSignupEmail("");
+    setSignupPassword("");
+    setSignupFirstName("");
+    setSignupLastName("");
+    setSignupPhone("");
+    setSignupRole("tenant");
+    setAuthScreen("login");
     setPaymentForm(initialPaymentForm);
     setMessage("Signed out.");
   }
@@ -157,10 +281,10 @@ export default function App() {
       return;
     }
     setBusy(true);
-    setMessage("Creating Juspay payment session...");
+    setMessage("Launching Razorpay checkout...");
     try {
       const initiated = await initiateTenantPayment(token, paymentForm);
-      const result = await launchJuspayPayment(initiated);
+      const result = await launchRazorpayPayment(initiated);
 
       if (result.status === "cancelled") {
         setMessage("Payment was cancelled.");
@@ -172,6 +296,7 @@ export default function App() {
         order_id: initiated.order_id,
         status: result.status === "succeeded" ? "succeeded" : "failed",
         provider_payment_id: result.providerPaymentId,
+        razorpay_signature: result.razorpaySignature,
         provider_payload: result.providerPayload,
       });
 
@@ -184,8 +309,8 @@ export default function App() {
       });
       setMessage(
         result.mode === "mock"
-          ? "Mock Juspay payment completed. Configure merchant credentials for live checkout."
-          : "Payment completed and synced from Juspay.",
+          ? "Mock payment completed. Set RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET for live UPI/card checkout."
+          : "Payment completed via Razorpay.",
       );
     } catch (error) {
       setMessage(readError(error));
@@ -218,13 +343,71 @@ export default function App() {
 
         {!user ? (
           <View style={styles.panel}>
-            <Text style={styles.sectionKicker}>Access</Text>
-            <Text style={styles.panelTitle}>Sign in</Text>
-            <View style={styles.formGrid}>
-              <Field label="Username" value={username} onChangeText={setUsername} />
-              <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+            <View style={styles.authTabs}>
+              <Pressable
+                style={[styles.authTab, authScreen === "login" && styles.authTabActive]}
+                onPress={() => setAuthScreen("login")}
+              >
+                <Text style={[styles.authTabText, authScreen === "login" && styles.authTabTextActive]}>Sign in</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.authTab, authScreen === "signup" && styles.authTabActive]}
+                onPress={() => setAuthScreen("signup")}
+              >
+                <Text style={[styles.authTabText, authScreen === "signup" && styles.authTabTextActive]}>Sign up</Text>
+              </Pressable>
             </View>
-            <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} />
+
+            {authScreen === "login" ? (
+              <>
+                <View style={styles.formGrid}>
+                  <Field label="Username" value={username} onChangeText={setUsername} />
+                  <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                </View>
+                <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} />
+              </>
+            ) : (
+              <>
+                <View style={styles.formGrid}>
+                  <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
+                  <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
+                  <Field label="Password" value={signupPassword} onChangeText={setSignupPassword} secureTextEntry />
+                  <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
+                  <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
+                  <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} />
+                  <View style={styles.roleToggle}>
+                    <Text style={styles.fieldLabel}>Role</Text>
+                    <View style={styles.roleOptions}>
+                      <Pressable
+                        style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
+                        onPress={() => setSignupRole("tenant")}
+                      >
+                        <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
+                          Tenant
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
+                        onPress={() => setSignupRole("landlord")}
+                      >
+                        <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
+                          Landlord
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+                <PrimaryButton label={busy ? "Creating account..." : "Create account"} onPress={handleSignup} disabled={busy} />
+              </>
+            )}
+
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
+            </View>
+
+            <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" />
           </View>
         ) : (
           <View style={styles.sessionBar}>
@@ -442,15 +625,27 @@ function PrimaryButton({
   label: string;
   onPress: () => void;
   disabled?: boolean;
-  variant?: "primary" | "secondary";
+  variant?: "primary" | "secondary" | "google";
 }) {
+  const variantStyle =
+    variant === "google"
+      ? styles.googleButton
+      : variant === "secondary"
+        ? styles.secondaryButton
+        : styles.primaryButton;
+  const textStyle =
+    variant === "google"
+      ? styles.googleButtonText
+      : variant === "secondary"
+        ? styles.secondaryButtonText
+        : styles.buttonText;
   return (
     <Pressable
-      style={[styles.button, variant === "secondary" ? styles.secondaryButton : styles.primaryButton, disabled && styles.disabledButton]}
+      style={[styles.button, variantStyle, disabled && styles.disabledButton]}
       onPress={onPress}
       disabled={disabled}
     >
-      <Text style={[styles.buttonText, variant === "secondary" && styles.secondaryButtonText]}>{label}</Text>
+      <Text style={textStyle}>{label}</Text>
     </Pressable>
   );
 }
@@ -575,12 +770,21 @@ const styles = StyleSheet.create({
   secondaryButton: {
     backgroundColor: "rgba(110,45,25,0.1)",
   },
+  googleButton: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.18)",
+  },
   buttonText: {
     color: "#fff8f3",
     fontWeight: "800",
   },
   secondaryButtonText: {
     color: "#6e2d19",
+  },
+  googleButtonText: {
+    color: "#433123",
+    fontWeight: "800",
   },
   disabledButton: {
     opacity: 0.5,
@@ -694,5 +898,68 @@ const styles = StyleSheet.create({
   helper: {
     color: "#74695c",
     lineHeight: 20,
+  },
+  authTabs: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 4,
+  },
+  authTab: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: "rgba(110,45,25,0.06)",
+  },
+  authTabActive: {
+    backgroundColor: "#b85c38",
+  },
+  authTabText: {
+    fontWeight: "800",
+    color: "#6e2d19",
+  },
+  authTabTextActive: {
+    color: "#fff",
+  },
+  roleToggle: {
+    gap: 8,
+  },
+  roleOptions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  roleOption: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.18)",
+    backgroundColor: "#fff",
+  },
+  roleOptionActive: {
+    backgroundColor: "#b85c38",
+    borderColor: "#b85c38",
+  },
+  roleOptionText: {
+    fontWeight: "700",
+    color: "#433123",
+  },
+  roleOptionTextActive: {
+    color: "#fff",
+  },
+  divider: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: "rgba(67,49,35,0.12)",
+  },
+  dividerText: {
+    color: "#74695c",
+    fontWeight: "700",
+    fontSize: 13,
   },
 });

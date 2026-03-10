@@ -30,9 +30,21 @@ function extractRedirectUrl(payload: Record<string, unknown>) {
     return nested.web;
   }
 
+  // Juspay hosted checkout link
+  const hostedUrl = payload.url as string | undefined;
+  if (hostedUrl && typeof hostedUrl === "string") {
+    return hostedUrl;
+  }
+
   return "";
 }
 
+/**
+ * Open a payment URL and wait for the user to return.
+ * On web we use a popup; on native we open external browser.
+ * In both cases the backend /confirm endpoint should be called afterwards
+ * to do server-side status verification with Juspay.
+ */
 export async function launchJuspayPayment(initiated: InitiatedPayment): Promise<PaymentLaunchResult> {
   if (initiated.mode === "mock") {
     return {
@@ -46,9 +58,26 @@ export async function launchJuspayPayment(initiated: InitiatedPayment): Promise<
   const redirectUrl = extractRedirectUrl(initiated.sdk_payload);
 
   if (Platform.OS === "web") {
+    // Try using the Juspay web SDK if available
     const webSdk = dynamicRequire("@juspay-tech/react-hyper-js");
     if (webSdk && typeof window !== "undefined" && redirectUrl) {
-      window.open(redirectUrl, "_blank", "noopener,noreferrer");
+      const popup = window.open(redirectUrl, "_blank", "noopener,noreferrer,width=500,height=700");
+      // Poll the popup to detect when the user returns
+      if (popup) {
+        await new Promise<void>((resolve) => {
+          const interval = setInterval(() => {
+            if (popup.closed) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 500);
+          // Safety timeout after 5 minutes
+          setTimeout(() => {
+            clearInterval(interval);
+            resolve();
+          }, 300_000);
+        });
+      }
       return {
         status: "succeeded",
         mode: "live",
@@ -57,8 +86,36 @@ export async function launchJuspayPayment(initiated: InitiatedPayment): Promise<
       };
     }
   } else {
+    // Native: try the Juspay native SDK
     const nativeSdk = dynamicRequire("hyper-sdk-react");
-    if (nativeSdk && redirectUrl) {
+    if (nativeSdk && nativeSdk.HyperSdkReact) {
+      try {
+        const processPayload = JSON.stringify({
+          requestId: initiated.order_id,
+          service: "in.juspay.hyperpay",
+          payload: {
+            action: "paymentPage",
+            merchantId: (initiated.sdk_payload as any).merchant_id || "",
+            clientId: (initiated.sdk_payload as any).client_id || "",
+            orderId: initiated.order_id,
+            ...initiated.sdk_payload,
+          },
+        });
+        const result = await nativeSdk.HyperSdkReact.process(processPayload);
+        const parsed = typeof result === "string" ? JSON.parse(result) : result;
+        const txnStatus = parsed?.status || parsed?.payload?.status || "";
+        return {
+          status: txnStatus === "charged" || txnStatus === "CHARGED" ? "succeeded" : "failed",
+          mode: "live",
+          providerPaymentId: parsed?.payload?.txn_id || parsed?.txn_id || initiated.order_id,
+          providerPayload: parsed,
+        };
+      } catch {
+        // Fall through to redirect URL
+      }
+    }
+
+    if (redirectUrl) {
       await Linking.openURL(redirectUrl);
       return {
         status: "succeeded",
