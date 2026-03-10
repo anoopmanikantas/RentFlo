@@ -10,6 +10,7 @@ export type AuthUser = {
   email: string;
   phone: string;
   role: "landlord" | "tenant";
+  tenant_code: string;
 };
 
 export type AuthResponse = {
@@ -34,6 +35,7 @@ export type LandlordDashboard = {
     tenant_name: string;
     tenant_email: string;
     tenant_phone: string;
+    tenant_code: string;
     building_name: string;
     unit_label: string;
     monthly_rent: string;
@@ -211,10 +213,17 @@ export function createBankAccount(
   );
 }
 
-export function createTenancy(token: string, data: { tenant_email: string; unit_id: number }) {
+export function createTenancy(token: string, data: { tenant_identifier: string; unit_id: number }) {
   return request<Record<string, unknown>>(
     "/landlord/tenancies/",
     { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+export function endTenancy(token: string, tenancyId: number) {
+  return request<{ detail: string }>(
+    `/landlord/tenancies/${tenancyId}/end/`,
+    { method: "POST" },
     token,
   );
 }

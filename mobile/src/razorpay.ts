@@ -94,6 +94,7 @@ export async function launchRazorpayPayment(initiated: InitiatedPayment): Promis
           resolve({
             status: "failed",
             mode: "live",
+            providerPaymentId: resp?.error?.metadata?.payment_id,
             providerPayload: resp?.error || resp,
           });
         });

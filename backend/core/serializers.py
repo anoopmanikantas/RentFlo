@@ -11,7 +11,7 @@ from .models import BankAccount, Building, JuspayOrder, Payment, Tenancy, Unit, 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "email", "phone", "role")
+        fields = ("id", "username", "first_name", "last_name", "email", "phone", "role", "tenant_code")
 
 
 class AuthLoginSerializer(serializers.Serializer):
@@ -95,6 +95,7 @@ class TenantSummarySerializer(serializers.ModelSerializer):
     tenant_name = serializers.CharField(source="tenant_user.get_full_name", read_only=True)
     tenant_email = serializers.CharField(source="tenant_user.email", read_only=True)
     tenant_phone = serializers.CharField(source="tenant_user.phone", read_only=True)
+    tenant_code = serializers.CharField(source="tenant_user.tenant_code", read_only=True)
     building_name = serializers.CharField(source="unit.building.name", read_only=True)
     unit_label = serializers.CharField(source="unit.label", read_only=True)
     monthly_rent = serializers.DecimalField(source="unit.monthly_rent", max_digits=12, decimal_places=2, read_only=True)
@@ -109,6 +110,7 @@ class TenantSummarySerializer(serializers.ModelSerializer):
             "tenant_name",
             "tenant_email",
             "tenant_phone",
+            "tenant_code",
             "building_name",
             "unit_label",
             "monthly_rent",
@@ -222,6 +224,6 @@ class CreateBankAccountSerializer(serializers.Serializer):
 
 
 class CreateTenancySerializer(serializers.Serializer):
-    tenant_email = serializers.EmailField()
+    tenant_identifier = serializers.CharField(help_text="Tenant code (RF-XXXX) or email address")
     unit_id = serializers.IntegerField()
 

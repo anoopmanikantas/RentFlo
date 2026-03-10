@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -20,6 +20,7 @@ import {
   createBuilding,
   createTenancy,
   createUnit,
+  endTenancy,
   fetchLandlordDashboard,
   fetchTenantDashboard,
   googleLogin,
@@ -496,6 +497,7 @@ export default function App() {
         {user?.role === "tenant" && tenantData ? (
           tenantData.tenancy ? (
             <TenantView
+              user={user}
               data={tenantData as TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> }}
               paymentForm={paymentForm}
               setPaymentForm={setPaymentForm}
@@ -535,7 +537,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   const [accNumber, setAccNumber] = useState("");
   const [ifsc, setIfsc] = useState("");
   // Tenancy form
-  const [tenantEmail, setTenantEmail] = useState("");
+  const [tenantIdentifier, setTenantIdentifier] = useState("");
   const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
 
   function openForm(form: FormType) {
@@ -578,7 +580,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           <View style={styles.inlineForm}>
             <Text style={styles.inlineFormTitle}>New building</Text>
             <Field label="Name" value={bName} onChangeText={setBName} />
-            <Field label="Address" value={bAddress} onChangeText={setBAddress} />
+            <AddressSearch value={bAddress} onSelect={setBAddress} />
             <PrimaryButton
               label={formBusy ? "Creating..." : "Create building"}
               disabled={formBusy || !bName.trim()}
@@ -662,8 +664,8 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         {activeForm === "tenancy" && (
           <View style={styles.inlineForm}>
             <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
-            <Text style={styles.helper}>The tenant must have signed up on RentFlo first.</Text>
-            <Field label="Tenant's email" value={tenantEmail} onChangeText={setTenantEmail} />
+            <Text style={styles.helper}>Enter the tenant's code (e.g. RF-A3K9) or email address.</Text>
+            <Field label="Tenant code or email" value={tenantIdentifier} onChangeText={setTenantIdentifier} />
             <Text style={styles.fieldLabel}>Select vacant unit</Text>
             <View style={{ gap: 6 }}>
               {unoccupiedUnits.length === 0 ? (
@@ -692,13 +694,13 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
             {unoccupiedUnits.length > 0 && (
               <PrimaryButton
                 label={formBusy ? "Assigning..." : "Assign tenant"}
-                disabled={formBusy || !tenantEmail.trim() || !selectedUnitId}
+                disabled={formBusy || !tenantIdentifier.trim() || !selectedUnitId}
                 onPress={async () => {
                   setFormBusy(true);
                   try {
-                    await createTenancy(token, { tenant_email: tenantEmail, unit_id: selectedUnitId! });
+                    await createTenancy(token, { tenant_identifier: tenantIdentifier, unit_id: selectedUnitId! });
                     setFormMsg(`✓ Tenant assigned successfully`);
-                    setTenantEmail(""); setSelectedUnitId(null); setActiveForm(null);
+                    setTenantIdentifier(""); setSelectedUnitId(null); setActiveForm(null);
                     onRefresh();
                   } catch (e) { setFormMsg(readError(e)); }
                   setFormBusy(false);
@@ -721,7 +723,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
               <View style={styles.tableMain}>
                 <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
                 <Text style={styles.rowMeta}>
-                  {tenant.building_name} / {tenant.unit_label}
+                  {tenant.building_name} / {tenant.unit_label} • <Text style={{ fontWeight: "700", color: "#6e2d19" }}>{tenant.tenant_code}</Text>
                 </Text>
               </View>
               <View style={styles.tableNumbers}>
@@ -729,6 +731,17 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                 <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
               </View>
               <StatusBadge status={tenant.status} />
+              <Pressable
+                style={styles.removeButton}
+                onPress={async () => {
+                  try {
+                    await endTenancy(token, tenant.id);
+                    onRefresh();
+                  } catch (e) { /* ignore */ }
+                }}
+              >
+                <Text style={styles.removeButtonText}>Remove</Text>
+              </Pressable>
             </View>
           ))}
         </View>
@@ -761,12 +774,14 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
 }
 
 function TenantView({
+  user,
   data,
   paymentForm,
   setPaymentForm,
   onSubmit,
   busy,
 }: {
+  user: AuthUser;
   data: TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> };
   paymentForm: InitiatePaymentInput;
   setPaymentForm: (value: InitiatePaymentInput) => void;
@@ -776,6 +791,7 @@ function TenantView({
   return (
     <View style={styles.stack}>
       <View style={styles.summaryGrid}>
+        <SummaryCard label="Your code" value={user.tenant_code || "—"} note="Share with landlord" />
         <SummaryCard label="Unit" value={data.tenancy.unit_label} note={data.tenancy.building_name} />
         <SummaryCard label="Monthly rent" value={money(data.tenancy.monthly_rent)} note={data.current_month} />
         <SummaryCard label="Paid" value={money(data.current_month_paid)} note="This month" />
@@ -881,14 +897,21 @@ function TenantWelcome({ user }: { user: AuthUser }) {
       <Text style={styles.helper}>
         Your account is set up, but your landlord hasn't assigned you to a unit yet.
       </Text>
-      <Text style={styles.helper}>
-        Share your email ({user.email}) with your landlord so they can link you to your apartment.
-        Once they do, you'll see your rent details and payment options here.
-      </Text>
+
+      <View style={[styles.summaryCard, { alignItems: "center", paddingVertical: 20 }]}>
+        <Text style={styles.summaryLabel}>Your Tenant Code</Text>
+        <Text style={{ fontSize: 28, fontWeight: "800", letterSpacing: 2, color: "#6e2d19", marginTop: 8 }}>
+          {user.tenant_code}
+        </Text>
+        <Text style={[styles.helper, { marginTop: 6, textAlign: "center" }]}>
+          Share this code with your landlord so they can link you to your unit.
+        </Text>
+      </View>
+
       <View style={styles.summaryCard}>
         <Text style={styles.summaryLabel}>What to do</Text>
-        <Text style={[styles.helper, { marginTop: 8 }]}>1. Ask your landlord to add you on RentFlo</Text>
-        <Text style={styles.helper}>2. They'll enter your email and assign a unit</Text>
+        <Text style={[styles.helper, { marginTop: 8 }]}>1. Share your code <Text style={{ fontWeight: "700" }}>{user.tenant_code}</Text> with your landlord</Text>
+        <Text style={styles.helper}>2. They'll enter the code and assign a unit</Text>
         <Text style={styles.helper}>3. Refresh this page to see your dashboard</Text>
       </View>
     </View>
@@ -913,6 +936,105 @@ function Field(props: {
         keyboardType={props.keyboardType}
         autoCapitalize="none"
       />
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OSM Nominatim address search + current-location reverse geocode
+// ---------------------------------------------------------------------------
+type NominatimResult = { place_id: number; display_name: string; lat: string; lon: string };
+
+function AddressSearch({ value, onSelect }: { value: string; onSelect: (address: string) => void }) {
+  const [query, setQuery] = useState(value);
+  const [results, setResults] = useState<NominatimResult[]>([]);
+  const [open, setOpen] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep local query in sync when parent value changes (e.g. form reset)
+  useEffect(() => { setQuery(value); }, [value]);
+
+  const search = useCallback(async (text: string) => {
+    if (text.length < 3) { setResults([]); return; }
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&q=${encodeURIComponent(text)}`;
+      const res = await fetch(url, { headers: { "User-Agent": "RentFlo/1.0" } });
+      const data: NominatimResult[] = await res.json();
+      setResults(data);
+      setOpen(data.length > 0);
+    } catch { setResults([]); }
+  }, []);
+
+  function handleChangeText(text: string) {
+    setQuery(text);
+    onSelect(text); // keep parent in sync for manual typing
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => search(text), 400);
+  }
+
+  function pickResult(r: NominatimResult) {
+    setQuery(r.display_name);
+    onSelect(r.display_name);
+    setOpen(false);
+    setResults([]);
+  }
+
+  async function useCurrentLocation() {
+    if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.geolocation) {
+      setLocating(true);
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          try {
+            const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`;
+            const res = await fetch(url, { headers: { "User-Agent": "RentFlo/1.0" } });
+            const data = await res.json();
+            const addr = data.display_name || `${pos.coords.latitude}, ${pos.coords.longitude}`;
+            setQuery(addr);
+            onSelect(addr);
+          } catch {
+            const fallback = `${pos.coords.latitude}, ${pos.coords.longitude}`;
+            setQuery(fallback);
+            onSelect(fallback);
+          } finally { setLocating(false); }
+        },
+        () => { setLocating(false); },
+        { enableHighAccuracy: true, timeout: 10000 },
+      );
+    }
+  }
+
+  return (
+    <View style={styles.field}>
+      <Text style={styles.fieldLabel}>Address</Text>
+      <View style={{ position: "relative" as const }}>
+        <TextInput
+          style={styles.input}
+          value={query}
+          onChangeText={handleChangeText}
+          placeholder="Search address or area..."
+          placeholderTextColor="#a09585"
+          autoCapitalize="none"
+        />
+        {open && results.length > 0 && (
+          <View style={styles.addressDropdown}>
+            {results.map((r) => (
+              <Pressable key={r.place_id} style={styles.addressItem} onPress={() => pickResult(r)}>
+                <Text style={styles.addressItemIcon}>📍</Text>
+                <Text style={styles.addressItemText} numberOfLines={2}>{r.display_name}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+      <Pressable
+        style={styles.locationButton}
+        onPress={useCurrentLocation}
+        disabled={locating}
+      >
+        <Text style={{ fontSize: 14 }}>{locating ? "⏳" : "📍"}</Text>
+        <Text style={styles.locationButtonText}>{locating ? "Locating..." : "Use current location"}</Text>
+      </Pressable>
     </View>
   );
 }
@@ -1256,6 +1378,18 @@ const styles = StyleSheet.create({
     color: "#433123",
     fontWeight: "800",
   },
+  removeButton: {
+    alignSelf: "flex-start",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: "rgba(180,40,40,0.1)",
+  },
+  removeButtonText: {
+    color: "#b42828",
+    fontSize: 13,
+    fontWeight: "700",
+  },
   helper: {
     color: "#74695c",
     lineHeight: 20,
@@ -1380,5 +1514,58 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "800",
     color: "#1e1a17",
+  },
+  addressDropdown: {
+    position: "absolute",
+    top: "100%",
+    left: 0,
+    right: 0,
+    zIndex: 50,
+    marginTop: 4,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.12)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 6,
+    overflow: "hidden",
+  },
+  addressItem: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(67,49,35,0.06)",
+  },
+  addressItemIcon: {
+    fontSize: 14,
+    marginTop: 2,
+  },
+  addressItemText: {
+    flex: 1,
+    fontSize: 13,
+    color: "#433123",
+    lineHeight: 18,
+  },
+  locationButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "rgba(110,45,25,0.06)",
+    marginTop: 2,
+  },
+  locationButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6e2d19",
   },
 });
