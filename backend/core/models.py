@@ -40,6 +40,65 @@ class TimestampedModel(models.Model):
         abstract = True
 
 
+# ---------------------------------------------------------------------------
+# Subscription & Tier pricing
+# ---------------------------------------------------------------------------
+
+TIER_LIMITS = {
+    "free":     {"max_units": 5,   "max_tenants": 5,   "price_monthly": 0,    "features": []},
+    "pro":      {"max_units": 25,  "max_tenants": 25,  "price_monthly": 499,  "features": ["analytics"]},
+    "business": {"max_units": 9999, "max_tenants": 9999, "price_monthly": 1499, "features": ["analytics", "reports_export"]},
+}
+
+ADDON_CATALOG = {
+    "analytics":      {"name": "Analytics Dashboard", "price_monthly": 199},
+    "reports_export":  {"name": "Payment Reports Export", "price_monthly": 99},
+}
+
+
+class Subscription(TimestampedModel):
+    class Tier(models.TextChoices):
+        FREE = "free", "Free"
+        PRO = "pro", "Pro"
+        BUSINESS = "business", "Business"
+
+    landlord = models.OneToOneField(User, on_delete=models.CASCADE, related_name="subscription")
+    tier = models.CharField(max_length=20, choices=Tier.choices, default=Tier.FREE)
+    max_units = models.PositiveIntegerField(default=5)
+    max_tenants = models.PositiveIntegerField(default=5)
+    razorpay_subscription_id = models.CharField(max_length=120, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.landlord} – {self.get_tier_display()}"
+
+    def apply_tier_limits(self, tier: str | None = None):
+        """Set max_units/max_tenants from TIER_LIMITS for the given (or current) tier."""
+        tier = tier or self.tier
+        limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
+        self.tier = tier
+        self.max_units = limits["max_units"]
+        self.max_tenants = limits["max_tenants"]
+
+
+class AddOn(TimestampedModel):
+    class Feature(models.TextChoices):
+        ANALYTICS = "analytics", "Analytics Dashboard"
+        REPORTS_EXPORT = "reports_export", "Payment Reports Export"
+
+    landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name="addons")
+    feature = models.CharField(max_length=40, choices=Feature.choices)
+    is_active = models.BooleanField(default=True)
+    razorpay_subscription_id = models.CharField(max_length=120, blank=True)
+
+    class Meta:
+        unique_together = ("landlord", "feature")
+
+    def __str__(self):
+        return f"{self.landlord} – {self.get_feature_display()}"
+
+
 class BankAccount(TimestampedModel):
     landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bank_accounts")
     bank_name = models.CharField(max_length=120)
