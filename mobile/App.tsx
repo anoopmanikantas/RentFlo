@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { startTransition, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -42,7 +43,51 @@ export default function App() {
   const [paymentForm, setPaymentForm] = useState<InitiatePaymentInput>(initialPaymentForm);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("Use the demo landlord or tenant credentials to sign in.");
+  const [isInitialized, setIsInitialized] = useState(false);
 
+  // Load token and user from persistent storage on app startup
+  useEffect(() => {
+    const loadStoredAuth = async () => {
+      try {
+        const storedToken = await AsyncStorage.getItem("authToken");
+        const storedUser = await AsyncStorage.getItem("authUser");
+        if (storedToken && storedUser) {
+          const parsedUser = JSON.parse(storedUser);
+          startTransition(() => {
+            setToken(storedToken);
+            setUser(parsedUser);
+          });
+        }
+      } catch (error) {
+        console.error("Failed to load auth from storage:", error);
+      } finally {
+        setIsInitialized(true);
+      }
+    };
+    void loadStoredAuth();
+  }, []);
+
+  // Save token and user to persistent storage whenever they change
+  useEffect(() => {
+    if (!isInitialized) return;
+    
+    const saveAuth = async () => {
+      try {
+        if (token && user) {
+          await AsyncStorage.setItem("authToken", token);
+          await AsyncStorage.setItem("authUser", JSON.stringify(user));
+        } else {
+          await AsyncStorage.removeItem("authToken");
+          await AsyncStorage.removeItem("authUser");
+        }
+      } catch (error) {
+        console.error("Failed to save auth to storage:", error);
+      }
+    };
+    void saveAuth();
+  }, [token, user, isInitialized]);
+
+  // Fetch dashboard data when token or user changes
   useEffect(() => {
     if (!token || !user) {
       return;
