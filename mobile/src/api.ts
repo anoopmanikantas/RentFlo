@@ -88,7 +88,6 @@ export type InitiatePaymentInput = {
 
 export type InitiatedPayment = {
   order_id: string;
-  payment_id: number;
   mode: "mock" | "live";
   provider: "razorpay";
   razorpay_order_id: string;

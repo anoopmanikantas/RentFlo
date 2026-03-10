@@ -323,14 +323,33 @@ export default function App() {
       const result = await launchRazorpayPayment(initiated);
 
       if (result.status === "cancelled") {
+        // Confirm as failed so the backend order is cleaned up (no Payment record created)
+        await confirmTenantPayment(token, {
+          order_id: initiated.order_id,
+          status: "failed",
+          provider_payload: { reason: "cancelled_by_user" },
+        }).catch(() => {}); // best-effort cleanup
         setMessage("Payment was cancelled.");
         setBusy(false);
         return;
       }
 
+      if (result.status === "failed") {
+        await confirmTenantPayment(token, {
+          order_id: initiated.order_id,
+          status: "failed",
+          provider_payment_id: result.providerPaymentId,
+          provider_payload: result.providerPayload,
+        }).catch(() => {});
+        setMessage("Payment failed. Please try again.");
+        setBusy(false);
+        return;
+      }
+
+      // Only confirm as succeeded when checkout actually succeeded
       await confirmTenantPayment(token, {
         order_id: initiated.order_id,
-        status: result.status === "succeeded" ? "succeeded" : "failed",
+        status: "succeeded",
         provider_payment_id: result.providerPaymentId,
         razorpay_signature: result.razorpaySignature,
         provider_payload: result.providerPayload,
@@ -347,7 +366,7 @@ export default function App() {
       }
       setMessage(
         result.mode === "mock"
-          ? "Mock payment completed. Set RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET for live UPI/card checkout."
+          ? "Mock payment recorded. Set RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET for live UPI/card checkout."
           : "Payment completed via Razorpay.",
       );
     } catch (error) {
@@ -360,7 +379,8 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.page}>
+      <ScrollView contentContainerStyle={styles.pageOuter}>
+        <View style={styles.pageInner}>
         <View style={styles.hero}>
           <View>
             <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
@@ -402,10 +422,39 @@ export default function App() {
                   <Field label="Username" value={username} onChangeText={setUsername} />
                   <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
                 </View>
-                <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} />
+                <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} fullWidth />
               </>
             ) : (
               <>
+                <View style={styles.roleToggle}>
+                  <Text style={styles.fieldLabel}>I am a</Text>
+                  <View style={styles.roleOptions}>
+                    <Pressable
+                      style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
+                      onPress={() => setSignupRole("landlord")}
+                    >
+                      <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
+                      <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
+                        Landlord
+                      </Text>
+                      <Text style={[styles.helper, signupRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                        Manage properties & collect rent
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
+                      onPress={() => setSignupRole("tenant")}
+                    >
+                      <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
+                      <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
+                        Tenant
+                      </Text>
+                      <Text style={[styles.helper, signupRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                        Pay rent & track payments
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
                 <View style={styles.formGrid}>
                   <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
                   <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
@@ -413,29 +462,8 @@ export default function App() {
                   <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
                   <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
                   <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} />
-                  <View style={styles.roleToggle}>
-                    <Text style={styles.fieldLabel}>Role</Text>
-                    <View style={styles.roleOptions}>
-                      <Pressable
-                        style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
-                        onPress={() => setSignupRole("tenant")}
-                      >
-                        <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
-                          Tenant
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
-                        onPress={() => setSignupRole("landlord")}
-                      >
-                        <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
-                          Landlord
-                        </Text>
-                      </Pressable>
-                    </View>
-                  </View>
                 </View>
-                <PrimaryButton label={busy ? "Creating account..." : "Create account"} onPress={handleSignup} disabled={busy} />
+                <PrimaryButton label={busy ? "Creating account..." : `Create ${signupRole} account`} onPress={handleSignup} disabled={busy} fullWidth />
               </>
             )}
 
@@ -445,7 +473,7 @@ export default function App() {
               <View style={styles.dividerLine} />
             </View>
 
-            <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" />
+            <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" fullWidth />
           </View>
         ) : (
           <View style={styles.sessionBar}>
@@ -482,6 +510,7 @@ export default function App() {
         {showRolePicker && user ? (
           <RolePicker onSelect={handleRoleSelect} busy={busy} />
         ) : null}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -541,7 +570,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
           <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
           <ActionChip icon="🏦" label="Bank account" active={activeForm === "bank"} onPress={() => openForm("bank")} />
-          <ActionChip icon="👤" label="Assign tenant" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} disabled={unoccupiedUnits.length === 0} />
+          <ActionChip icon="👤" label="Assign tenant" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} />
         </View>
 
         {/* Building form */}
@@ -638,7 +667,14 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
             <Text style={styles.fieldLabel}>Select vacant unit</Text>
             <View style={{ gap: 6 }}>
               {unoccupiedUnits.length === 0 ? (
-                <Text style={styles.helper}>All units are occupied. Add a new unit first.</Text>
+                <View style={{ gap: 10 }}>
+                  <Text style={styles.helper}>All {data.units.length} units are currently occupied.</Text>
+                  <PrimaryButton
+                    label="+ Create a new unit first"
+                    variant="secondary"
+                    onPress={() => { setActiveForm("unit"); setFormMsg(""); }}
+                  />
+                </View>
               ) : (
                 unoccupiedUnits.map((u) => (
                   <Pressable
@@ -653,20 +689,22 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                 ))
               )}
             </View>
-            <PrimaryButton
-              label={formBusy ? "Assigning..." : "Assign tenant"}
-              disabled={formBusy || !tenantEmail.trim() || !selectedUnitId}
-              onPress={async () => {
-                setFormBusy(true);
-                try {
-                  await createTenancy(token, { tenant_email: tenantEmail, unit_id: selectedUnitId! });
-                  setFormMsg(`✓ Tenant assigned successfully`);
-                  setTenantEmail(""); setSelectedUnitId(null); setActiveForm(null);
-                  onRefresh();
-                } catch (e) { setFormMsg(readError(e)); }
-                setFormBusy(false);
-              }}
-            />
+            {unoccupiedUnits.length > 0 && (
+              <PrimaryButton
+                label={formBusy ? "Assigning..." : "Assign tenant"}
+                disabled={formBusy || !tenantEmail.trim() || !selectedUnitId}
+                onPress={async () => {
+                  setFormBusy(true);
+                  try {
+                    await createTenancy(token, { tenant_email: tenantEmail, unit_id: selectedUnitId! });
+                    setFormMsg(`✓ Tenant assigned successfully`);
+                    setTenantEmail(""); setSelectedUnitId(null); setActiveForm(null);
+                    onRefresh();
+                  } catch (e) { setFormMsg(readError(e)); }
+                  setFormBusy(false);
+                }}
+              />
+            )}
           </View>
         )}
       </View>
@@ -769,7 +807,7 @@ function TenantView({
         <Text style={styles.helper}>
           Available accounts: {data.bank_accounts.map((account) => `${account.id}: ${account.bank_name}`).join(" • ")}
         </Text>
-        <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} />
+        <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} fullWidth />
       </View>
 
       <View style={styles.panel}>
@@ -908,11 +946,13 @@ function PrimaryButton({
   onPress,
   disabled,
   variant = "primary",
+  fullWidth = false,
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
   variant?: "primary" | "secondary" | "google";
+  fullWidth?: boolean;
 }) {
   const variantStyle =
     variant === "google"
@@ -928,7 +968,7 @@ function PrimaryButton({
         : styles.buttonText;
   return (
     <Pressable
-      style={[styles.button, variantStyle, disabled && styles.disabledButton]}
+      style={[styles.button, variantStyle, fullWidth && { alignSelf: "stretch" as const }, disabled && styles.disabledButton]}
       onPress={onPress}
       disabled={disabled}
     >
@@ -970,14 +1010,20 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#f4efe4",
   },
-  page: {
-    padding: 18,
+  pageOuter: {
+    alignItems: "center",
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+  },
+  pageInner: {
+    width: "100%",
+    maxWidth: 520,
     gap: 18,
   },
   hero: {
     gap: 16,
-    padding: 20,
-    borderRadius: 24,
+    padding: 24,
+    borderRadius: 20,
     backgroundColor: "#fff8ef",
     borderWidth: 1,
     borderColor: "rgba(67,49,35,0.12)",
@@ -1022,11 +1068,11 @@ const styles = StyleSheet.create({
   },
   panel: {
     backgroundColor: "rgba(255,250,242,0.86)",
-    borderRadius: 24,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: "rgba(67,49,35,0.12)",
-    padding: 18,
-    gap: 14,
+    padding: 20,
+    gap: 16,
   },
   sectionKicker: {
     color: "#6e2d19",
@@ -1051,18 +1097,20 @@ const styles = StyleSheet.create({
     color: "#433123",
   },
   input: {
-    borderRadius: 14,
+    borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderWidth: 1,
     borderColor: "rgba(67,49,35,0.18)",
     backgroundColor: "#fff",
+    fontSize: 15,
   },
   button: {
     paddingVertical: 14,
-    paddingHorizontal: 18,
-    borderRadius: 999,
+    paddingHorizontal: 28,
+    borderRadius: 12,
     alignItems: "center",
+    alignSelf: "flex-start",
   },
   primaryButton: {
     backgroundColor: "#b85c38",
@@ -1094,9 +1142,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     gap: 12,
-    padding: 16,
-    borderRadius: 20,
+    padding: 14,
+    paddingHorizontal: 18,
+    borderRadius: 14,
     backgroundColor: "#fff8ef",
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.08)",
   },
   sessionText: {
     color: "#433123",
@@ -1121,9 +1172,13 @@ const styles = StyleSheet.create({
     gap: 18,
   },
   summaryGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 12,
   },
   summaryCard: {
+    flex: 1,
+    minWidth: 140,
     padding: 18,
     borderRadius: 22,
     backgroundColor: "rgba(255,250,242,0.86)",
@@ -1150,6 +1205,9 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   tableRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
     padding: 14,
     borderRadius: 18,
     backgroundColor: "#fff",
@@ -1158,9 +1216,12 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   tableMain: {
+    flex: 1,
+    minWidth: 120,
     gap: 4,
   },
   tableNumbers: {
+    alignItems: "flex-end",
     gap: 4,
   },
   rowTitle: {
@@ -1222,6 +1283,7 @@ const styles = StyleSheet.create({
   },
   roleToggle: {
     gap: 8,
+    marginBottom: 4,
   },
   roleOptions: {
     flexDirection: "row",
@@ -1229,7 +1291,8 @@ const styles = StyleSheet.create({
   },
   roleOption: {
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
     borderRadius: 14,
     alignItems: "center",
     borderWidth: 1,

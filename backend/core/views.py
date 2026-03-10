@@ -252,25 +252,13 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
         order.status = JuspayOrder.Status.PENDING
         order.save(update_fields=["juspay_order_id", "payment_session_id", "metadata", "status", "updated_at"])
 
-        payment = Payment.objects.create(
-            landlord=tenancy.landlord,
-            tenancy=tenancy,
-            unit=tenancy.unit,
-            bank_account=bank_account,
-            rent_month=order.rent_month,
-            amount=order.amount,
-            paid_on=date.today(),
-            status=Payment.Status.INITIATED,
-            provider="razorpay",
-            provider_order_id=remote.get("razorpay_order_id", order.order_id),
-            provider_payload=remote.get("sdk_payload", {}),
-            juspay_order=order,
-        )
+        # NOTE: Payment record is NOT created here. It is created only when
+        # the confirm endpoint receives a verified result. This prevents
+        # orphaned "initiated" payments when checkout fails or is cancelled.
 
         return Response(
             {
                 "order_id": order.order_id,
-                "payment_id": payment.id,
                 "mode": remote["mode"],
                 "provider": "razorpay",
                 "razorpay_order_id": remote.get("razorpay_order_id", ""),
@@ -337,18 +325,36 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
         order.metadata = provider_payload or order.metadata
         order.save(update_fields=["status", "metadata", "updated_at"])
 
+        # Create (or update) the Payment record now that we have a confirmed result.
+        final_payment_status = (
+            Payment.Status.SUCCEEDED
+            if resolved_status == JuspayOrder.Status.SUCCEEDED
+            else Payment.Status.FAILED
+        )
         payment = Payment.objects.filter(juspay_order=order, tenancy=tenancy).first()
         if payment:
-            payment.status = (
-                Payment.Status.SUCCEEDED
-                if resolved_status == JuspayOrder.Status.SUCCEEDED
-                else Payment.Status.FAILED
-            )
+            payment.status = final_payment_status
             payment.provider_payment_id = provider_payment_id
             payment.provider_payload = provider_payload or payment.provider_payload
             payment.save(update_fields=["status", "provider_payment_id", "provider_payload", "updated_at"])
+        else:
+            payment = Payment.objects.create(
+                landlord=tenancy.landlord,
+                tenancy=tenancy,
+                unit=tenancy.unit,
+                bank_account=order.bank_account,
+                rent_month=order.rent_month,
+                amount=order.amount,
+                paid_on=date.today(),
+                status=final_payment_status,
+                provider="razorpay",
+                provider_order_id=order.juspay_order_id or order.order_id,
+                provider_payment_id=provider_payment_id,
+                provider_payload=provider_payload or {},
+                juspay_order=order,
+            )
 
-        return Response({"detail": "Payment status updated."})
+        return Response({"detail": "Payment status updated.", "status": final_payment_status})
 
 
 class CreateBuildingView(AuthenticatedAPIView):

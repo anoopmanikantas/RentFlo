@@ -20,3 +20,5 @@ backend/staticfiles/
 .idea/
 *.swp
 *.swo
+
+run.sh
