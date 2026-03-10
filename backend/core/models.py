@@ -1,5 +1,17 @@
+import string
+import random
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+
+
+def generate_tenant_code():
+    """Generate a short unique code like RF-A3K9."""
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        code = "RF-" + "".join(random.choices(chars, k=4))
+        if not User.objects.filter(tenant_code=code).exists():
+            return code
 
 
 class User(AbstractUser):
@@ -9,6 +21,12 @@ class User(AbstractUser):
 
     role = models.CharField(max_length=20, choices=Role.choices)
     phone = models.CharField(max_length=32, blank=True)
+    tenant_code = models.CharField(max_length=10, unique=True, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        if not self.tenant_code:
+            self.tenant_code = generate_tenant_code()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.get_full_name() or self.username

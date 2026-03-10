@@ -1,3 +1,4 @@
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -28,6 +29,14 @@ from .serializers import (
     UserSerializer,
 )
 from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
+
+
+def _resolve_tenant(identifier: str):
+    """Resolve a tenant by code (RF-XXXX) or email."""
+    identifier = identifier.strip()
+    if identifier.upper().startswith("RF-"):
+        return User.objects.filter(tenant_code__iexact=identifier, role=User.Role.TENANT).first()
+    return User.objects.filter(email=identifier, role=User.Role.TENANT).first()
 
 
 def current_month():
@@ -222,7 +231,7 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
         if not bank_account:
             return Response({"detail": "Bank account not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        order_id = f"rent_{tenancy.id}_{serializer.validated_data['rent_month']}_{date.today().strftime('%Y%m%d%H%M%S')}"
+        order_id = f"rent_{tenancy.id}_{serializer.validated_data['rent_month']}_{uuid.uuid4().hex[:12]}"
         order = JuspayOrder.objects.create(
             tenancy=tenancy,
             bank_account=bank_account,
@@ -402,12 +411,10 @@ class CreateTenancyView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         serializer = CreateTenancySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        tenant = User.objects.filter(
-            email=serializer.validated_data["tenant_email"], role=User.Role.TENANT
-        ).first()
+        tenant = _resolve_tenant(serializer.validated_data["tenant_identifier"])
         if not tenant:
             return Response(
-                {"detail": "No tenant account found with that email."},
+                {"detail": "No tenant account found. Check the tenant code or email."},
                 status=status.HTTP_404_NOT_FOUND,
             )
         if Tenancy.objects.filter(tenant_user=tenant, is_active=True).exists():
@@ -435,3 +442,17 @@ class CreateTenancyView(AuthenticatedAPIView):
             TenantSummarySerializer(tenancy, context={"rent_month": current_month()}).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class EndTenancyView(AuthenticatedAPIView):
+    def post(self, request, tenancy_id):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        tenancy = Tenancy.objects.filter(
+            id=tenancy_id, landlord=request.user, is_active=True
+        ).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        tenancy.is_active = False
+        tenancy.save(update_fields=["is_active", "updated_at"])
+        return Response({"detail": f"Tenancy ended for {tenancy.tenant_user.get_full_name()}."})
