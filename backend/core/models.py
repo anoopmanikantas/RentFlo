@@ -142,19 +142,19 @@ class Tenancy(TimestampedModel):
         return f"{self.tenant_user} @ {self.unit}"
 
 
-class JuspayOrder(TimestampedModel):
+class RazorpayOrder(TimestampedModel):
     class Status(models.TextChoices):
         CREATED = "created", "Created"
         PENDING = "pending", "Pending"
         SUCCEEDED = "succeeded", "Succeeded"
         FAILED = "failed", "Failed"
 
-    tenancy = models.ForeignKey(Tenancy, on_delete=models.CASCADE, related_name="juspay_orders")
-    bank_account = models.ForeignKey(BankAccount, on_delete=models.PROTECT, related_name="juspay_orders")
+    tenancy = models.ForeignKey(Tenancy, on_delete=models.CASCADE, related_name="razorpay_orders")
+    bank_account = models.ForeignKey(BankAccount, on_delete=models.PROTECT, related_name="razorpay_orders")
     rent_month = models.CharField(max_length=7)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     order_id = models.CharField(max_length=120, unique=True)
-    juspay_order_id = models.CharField(max_length=120, blank=True)
+    razorpay_order_id = models.CharField(max_length=120, blank=True)
     payment_session_id = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.CREATED)
     metadata = models.JSONField(default=dict, blank=True)
@@ -179,12 +179,12 @@ class Payment(TimestampedModel):
     reference = models.CharField(max_length=120, blank=True)
     note = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.INITIATED)
-    provider = models.CharField(max_length=32, default="juspay")
+    provider = models.CharField(max_length=32, default="razorpay")
     provider_payment_id = models.CharField(max_length=255, blank=True)
     provider_order_id = models.CharField(max_length=255, blank=True)
     provider_payload = models.JSONField(default=dict, blank=True)
-    juspay_order = models.ForeignKey(
-        JuspayOrder, null=True, blank=True, on_delete=models.SET_NULL, related_name="payments"
+    razorpay_order = models.ForeignKey(
+        RazorpayOrder, null=True, blank=True, on_delete=models.SET_NULL, related_name="payments"
     )
 
     def __str__(self):

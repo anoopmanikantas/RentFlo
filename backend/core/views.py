@@ -12,7 +12,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AddOn, BankAccount, Building, JuspayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
+from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
 from .serializers import (
     ActivateAddOnSerializer,
     AuthLoginSerializer,
@@ -295,13 +295,13 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
             return Response({"detail": "Bank account not found"}, status=status.HTTP_404_NOT_FOUND)
 
         order_id = f"rent_{tenancy.id}_{serializer.validated_data['rent_month']}_{uuid.uuid4().hex[:12]}"
-        order = JuspayOrder.objects.create(
+        order = RazorpayOrder.objects.create(
             tenancy=tenancy,
             bank_account=bank_account,
             rent_month=serializer.validated_data["rent_month"],
             amount=serializer.validated_data["amount"],
             order_id=order_id,
-            status=JuspayOrder.Status.CREATED,
+            status=RazorpayOrder.Status.CREATED,
         )
 
         client = RazorpayClient()
@@ -313,16 +313,16 @@ class InitiateTenantPaymentView(AuthenticatedAPIView):
                 customer_name=request.user.get_full_name(),
             )
         except RazorpayClientError as exc:
-            order.status = JuspayOrder.Status.FAILED
+            order.status = RazorpayOrder.Status.FAILED
             order.metadata = {"error": str(exc)}
             order.save(update_fields=["status", "metadata", "updated_at"])
             return Response({"detail": "Unable to create Razorpay order.", "error": str(exc)}, status=502)
 
-        order.juspay_order_id = remote.get("razorpay_order_id", "")
+        order.razorpay_order_id = remote.get("razorpay_order_id", "")
         order.payment_session_id = ""  # not used by Razorpay
         order.metadata = remote.get("sdk_payload", {})
-        order.status = JuspayOrder.Status.PENDING
-        order.save(update_fields=["juspay_order_id", "payment_session_id", "metadata", "status", "updated_at"])
+        order.status = RazorpayOrder.Status.PENDING
+        order.save(update_fields=["razorpay_order_id", "payment_session_id", "metadata", "status", "updated_at"])
 
         # NOTE: Payment record is NOT created here. It is created only when
         # the confirm endpoint receives a verified result. This prevents
@@ -352,7 +352,7 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
         if not tenancy:
             return Response({"detail": "Tenancy not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        order = JuspayOrder.objects.filter(order_id=serializer.validated_data["order_id"], tenancy=tenancy).first()
+        order = RazorpayOrder.objects.filter(order_id=serializer.validated_data["order_id"], tenancy=tenancy).first()
         if not order:
             return Response({"detail": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -365,19 +365,19 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
         # Server-side signature verification with Razorpay
         if client.configured and provider_payment_id and razorpay_signature:
             sig_valid = client.verify_payment_signature(
-                razorpay_order_id=order.juspay_order_id,  # stores razorpay_order_id
+                razorpay_order_id=order.razorpay_order_id,  # stores razorpay_order_id
                 razorpay_payment_id=provider_payment_id,
                 razorpay_signature=razorpay_signature,
             )
             if sig_valid:
-                resolved_status = JuspayOrder.Status.SUCCEEDED
+                resolved_status = RazorpayOrder.Status.SUCCEEDED
                 # Fetch full payment details for the record
                 try:
                     provider_payload = client.fetch_payment(provider_payment_id)
                 except RazorpayClientError:
                     pass
             else:
-                resolved_status = JuspayOrder.Status.FAILED
+                resolved_status = RazorpayOrder.Status.FAILED
         elif client.configured and provider_payment_id:
             # No signature supplied: fetch payment status directly
             try:
@@ -385,11 +385,11 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
                 provider_payload = remote
                 rzp_status = remote.get("status", "")
                 if rzp_status == "captured":
-                    resolved_status = JuspayOrder.Status.SUCCEEDED
+                    resolved_status = RazorpayOrder.Status.SUCCEEDED
                 elif rzp_status in ("failed", "refunded"):
-                    resolved_status = JuspayOrder.Status.FAILED
+                    resolved_status = RazorpayOrder.Status.FAILED
                 else:
-                    resolved_status = JuspayOrder.Status.PENDING
+                    resolved_status = RazorpayOrder.Status.PENDING
             except RazorpayClientError:
                 pass
 
@@ -400,10 +400,10 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
         # Create (or update) the Payment record now that we have a confirmed result.
         final_payment_status = (
             Payment.Status.SUCCEEDED
-            if resolved_status == JuspayOrder.Status.SUCCEEDED
+            if resolved_status == RazorpayOrder.Status.SUCCEEDED
             else Payment.Status.FAILED
         )
-        payment = Payment.objects.filter(juspay_order=order, tenancy=tenancy).first()
+        payment = Payment.objects.filter(razorpay_order=order, tenancy=tenancy).first()
         if payment:
             payment.status = final_payment_status
             payment.provider_payment_id = provider_payment_id
@@ -420,10 +420,10 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
                 paid_on=date.today(),
                 status=final_payment_status,
                 provider="razorpay",
-                provider_order_id=order.juspay_order_id or order.order_id,
+                provider_order_id=order.razorpay_order_id or order.order_id,
                 provider_payment_id=provider_payment_id,
                 provider_payload=provider_payload or {},
-                juspay_order=order,
+                razorpay_order=order,
             )
 
         return Response({"detail": "Payment status updated.", "status": final_payment_status})

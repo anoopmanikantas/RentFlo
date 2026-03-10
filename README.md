@@ -4,7 +4,7 @@ Cross-platform rent tracking app:
 
 - Frontend: React Native with Expo for iOS, Android, and web in [mobile](/Users/anoopsubramani/Documents/Playground/mobile)
 - Backend: Django REST API in [backend](/Users/anoopsubramani/Documents/Playground/backend)
-- Payments: Juspay order/session initiation scaffold with tenant payment confirmation flow
+- Payments: Razorpay integration for tenant rent payments with full support for subscriptions and add-ons
 
 ## Backend
 
@@ -18,16 +18,14 @@ python manage.py runserver
 
 Backend base URL: `http://127.0.0.1:8000/api`
 
-Optional Juspay env vars:
+Razorpay env vars (optional for live payments):
 
 ```bash
-export JUSPAY_BASE_URL="https://..."
-export JUSPAY_API_KEY="..."
-export JUSPAY_MERCHANT_ID="..."
-export JUSPAY_RETURN_URL="http://localhost:8081/payment-result"
+export RAZORPAY_KEY_ID="..."
+export RAZORPAY_KEY_SECRET="..."
 ```
 
-Without those vars, the backend uses mock payment sessions so the tenant flow remains testable.
+Without these vars, the backend uses mock payment sessions so the payment flows remain testable.
 
 ## Mobile / Web App
 
@@ -53,5 +51,6 @@ npm run web
 ## Notes
 
 - The Expo app uses one React Native codebase for iOS, Android, and web.
-- The Juspay flow is production-ready on the backend shape, but live checkout still needs real Juspay merchant credentials and final provider payload mapping for your merchant account.
-- `hyper-sdk-react` is installed for native and `@juspay-tech/react-hyper-js` is installed for web, but Expo native production usage will require prebuild/custom native integration if you want to invoke the native Juspay SDK instead of redirect-based checkout.
+- Razorpay integration is production-ready. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to enable live payments.
+- Tier-based pricing: Free (5 units, 5 tenants), Pro (25 units, 25 tenants, ₹499/mo), Business (unlimited, ₹1499/mo).
+- Add-ons: Analytics Dashboard (₹199/mo), Payment Reports Export (₹99/mo).

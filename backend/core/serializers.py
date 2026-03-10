@@ -5,7 +5,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.authtoken.models import Token
 
-from .models import AddOn, BankAccount, Building, JuspayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
+from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -195,7 +195,7 @@ class InitiatePaymentSerializer(serializers.Serializer):
 
 class ConfirmPaymentSerializer(serializers.Serializer):
     order_id = serializers.CharField()
-    status = serializers.ChoiceField(choices=JuspayOrder.Status.choices)
+    status = serializers.ChoiceField(choices=RazorpayOrder.Status.choices)
     provider_payment_id = serializers.CharField(required=False, allow_blank=True)
     razorpay_signature = serializers.CharField(required=False, allow_blank=True)
     provider_payload = serializers.JSONField(required=False)
