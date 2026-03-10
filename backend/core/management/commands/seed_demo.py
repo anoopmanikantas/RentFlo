@@ -25,12 +25,12 @@ class Command(BaseCommand):
             phone="+91 98765 43210",
         )
 
-        # Create Free-tier subscription for the demo landlord
+        # Create Pro-tier subscription for the demo landlord (analytics enabled)
         Subscription.objects.create(
             landlord=landlord,
-            tier=Subscription.Tier.FREE,
-            max_units=5,
-            max_tenants=5,
+            tier=Subscription.Tier.PRO,
+            max_units=25,
+            max_tenants=25,
         )
 
         bank_1 = BankAccount.objects.create(

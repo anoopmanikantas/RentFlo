@@ -176,6 +176,7 @@ class Payment(TimestampedModel):
     rent_month = models.CharField(max_length=7)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     paid_on = models.DateField()
+    due_on = models.DateField(null=True, blank=True)  # Expected due date for delinquency tracking
     reference = models.CharField(max_length=120, blank=True)
     note = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.INITIATED)
@@ -186,6 +187,33 @@ class Payment(TimestampedModel):
     razorpay_order = models.ForeignKey(
         RazorpayOrder, null=True, blank=True, on_delete=models.SET_NULL, related_name="payments"
     )
+    category = models.CharField(
+        max_length=32,
+        choices=[
+            ("rent", "Rent"),
+            ("maintenance", "Maintenance"),
+            ("utilities", "Utilities"),
+            ("tax", "Tax"),
+            ("other", "Other"),
+        ],
+        default="rent",
+    )  # For tax categorization
 
     def __str__(self):
         return f"{self.tenancy.tenant_user} {self.rent_month} {self.amount}"
+
+
+class MaintenanceRecord(TimestampedModel):
+    class Type(models.TextChoices):
+        PREVENTATIVE = "preventative", "Preventative"
+        REACTIVE = "reactive", "Reactive / Emergency"
+
+    landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name="maintenance_records")
+    unit = models.ForeignKey(Unit, on_delete=models.CASCADE, related_name="maintenance_records")
+    date = models.DateField()
+    description = models.TextField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    type = models.CharField(max_length=20, choices=Type.choices, default=Type.REACTIVE)
+
+    def __str__(self):
+        return f"{self.unit} - {self.amount} on {self.date}"

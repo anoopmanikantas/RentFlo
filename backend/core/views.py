@@ -12,7 +12,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
+from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG, MaintenanceRecord
 from .serializers import (
     ActivateAddOnSerializer,
     AuthLoginSerializer,
@@ -881,3 +881,339 @@ class PaymentReportExportView(AuthenticatedAPIView):
         response = HttpResponse(output.getvalue(), content_type="text/csv")
         response["Content-Disposition"] = f'attachment; filename="rentflo_payments_{date.today()}.csv"'
         return response
+
+
+# ============================================================================
+# PREMIUM ANALYTICS ENDPOINTS
+# ============================================================================
+
+
+def _calculate_delinquency_stats(landlord):
+    """Calculate delinquency metrics by days overdue."""
+    from datetime import timedelta
+
+    today = date.today()
+    payments = Payment.objects.filter(landlord=landlord, status=Payment.Status.SUCCEEDED)
+
+    delinquencies = {"_30": [], "_60": [], "_90": []}
+    total_delinquent = Decimal(0)
+
+    # For each active tenancy, check for overdue rent
+    for tenancy in landlord.tenancies.filter(is_active=True):
+        # Find the latest payment
+        latest = payments.filter(tenancy=tenancy).order_by("-paid_on").first()
+        if not latest:
+            continue
+        # Expected next payment is roughly one month after
+        expected_next = latest.paid_on + timedelta(days=30)
+        days_overdue = (today - expected_next).days
+        if days_overdue <= 0:
+            continue
+        # Track delinquency
+        amount = tenancy.unit.monthly_rent
+        total_delinquent += amount
+        if days_overdue >= 90:
+            delinquencies["_90"].append({
+                "tenant": tenancy.tenant_user.get_full_name(),
+                "unit": str(tenancy.unit),
+                "days_overdue": days_overdue,
+                "amount": float(amount),
+            })
+        elif days_overdue >= 60:
+            delinquencies["_60"].append({
+                "tenant": tenancy.tenant_user.get_full_name(),
+                "unit": str(tenancy.unit),
+                "days_overdue": days_overdue,
+                "amount": float(amount),
+            })
+        elif days_overdue >= 30:
+            delinquencies["_30"].append({
+                "tenant": tenancy.tenant_user.get_full_name(),
+                "unit": str(tenancy.unit),
+                "days_overdue": days_overdue,
+                "amount": float(amount),
+            })
+
+    total_due = Tenancy.objects.filter(landlord=landlord, is_active=True).aggregate(
+        total=Sum("unit__monthly_rent")
+    )["total"] or Decimal(0)
+    collection_rate = float((1 - (total_delinquent / total_due)) * 100) if total_due > 0 else 100
+
+    return {
+        "total_delinquent": float(total_delinquent),
+        "delinquent_count": sum(len(v) for v in delinquencies.values()),
+        "overdue_30_days": delinquencies["_30"],
+        "overdue_60_days": delinquencies["_60"],
+        "overdue_90_days": delinquencies["_90"],
+        "collection_effectiveness": collection_rate,
+    }
+
+
+def _calculate_cash_flow_forecast(landlord):
+    """Forecast next 6 months of cash flow based on historical data."""
+    from datetime import timedelta
+    from collections import defaultdict
+
+    # Calculate average collection rate from last 3 months
+    today = date.today()
+    three_months_ago = today - timedelta(days=90)
+    recent_payments = Payment.objects.filter(
+        landlord=landlord, paid_on__gte=three_months_ago, status=Payment.Status.SUCCEEDED
+    )
+    
+    total_units = Unit.objects.filter(building__landlord=landlord).count()
+    monthly_expected = total_units * Tenancy.objects.filter(landlord=landlord, is_active=True).aggregate(
+        avg=Sum("unit__monthly_rent")
+    )["avg"] if total_units > 0 else Decimal(0)
+
+    recent_collected = recent_payments.aggregate(total=Sum("amount"))["total"] or Decimal(0)
+    historical_rate = min(float(recent_collected / (monthly_expected * 3)) if monthly_expected > 0 else 0.8, 1.0)
+
+    forecast = []
+    for i in range(6):
+        month_date = today + timedelta(days=30 * (i + 1))
+        month_str = month_date.strftime("%Y-%m")
+        expected = float(monthly_expected) * historical_rate
+        forecast.append({
+            "month": month_str,
+            "expected_collection": expected,
+            "confidence": 75 if i < 3 else 50,
+        })
+
+    return forecast
+
+
+def _calculate_property_roi(landlord):
+    """Calculate ROI by property (simplified without property value)."""
+    properties = Building.objects.filter(landlord=landlord)
+    roi_data = []
+
+    for prop in properties:
+        total_rent_collected = Payment.objects.filter(
+            landlord=landlord, unit__building=prop, status=Payment.Status.SUCCEEDED
+        ).aggregate(total=Sum("amount"))["total"] or Decimal(0)
+
+        maintenance_cost = MaintenanceRecord.objects.filter(unit__building=prop).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal(0)
+
+        unit_count = Unit.objects.filter(building=prop).count()
+        occupancy_units = Tenancy.objects.filter(landlord=landlord, unit__building=prop, is_active=True).count()
+        occupancy_rate = (occupancy_units / unit_count * 100) if unit_count > 0 else 0
+
+        net_income = total_rent_collected - maintenance_cost
+        roi_data.append({
+            "property": prop.name,
+            "total_collected": float(total_rent_collected),
+            "maintenance_cost": float(maintenance_cost),
+            "net_income": float(net_income),
+            "occupancy_rate": occupancy_rate,
+            "units": unit_count,
+        })
+
+    return sorted(roi_data, key=lambda x: x["net_income"], reverse=True)
+
+
+def _calculate_tenant_risk_scores(landlord):
+    """Score tenants by payment reliability."""
+    from datetime import datetime
+
+    tenants = []
+    for tenancy in landlord.tenancies.filter(is_active=True).select_related("tenant_user", "unit"):
+        payments = Payment.objects.filter(tenancy=tenancy, status=Payment.Status.SUCCEEDED).order_by("-paid_on")
+        on_time_count = 0
+        late_count = 0
+
+        for p in payments[:6]:  # Last 6 payments
+            if p.paid_on and p.due_on:
+                if p.paid_on <= p.due_on:
+                    on_time_count += 1
+                else:
+                    late_count += 1
+
+        total = on_time_count + late_count
+        reliability = (on_time_count / total * 100) if total > 0 else 50
+        risk_level = "low" if reliability >= 90 else "medium" if reliability >= 70 else "high"
+
+        tenants.append({
+            "tenant": tenancy.tenant_user.get_full_name(),
+            "unit": str(tenancy.unit),
+            "payment_reliability": round(reliability, 1),
+            "on_time_payments": on_time_count,
+            "late_payments": late_count,
+            "risk_level": risk_level,
+        })
+
+    return sorted(tenants, key=lambda x: x["payment_reliability"], reverse=True)
+
+
+def _calculate_maintenance_intelligence(landlord):
+    """Analyze maintenance costs and patterns."""
+    records = MaintenanceRecord.objects.filter(landlord=landlord)
+    preventative = records.filter(type=MaintenanceRecord.Type.PREVENTATIVE).aggregate(
+        total=Sum("amount"), count=Count("id")
+    )
+    reactive = records.filter(type=MaintenanceRecord.Type.REACTIVE).aggregate(
+        total=Sum("amount"), count=Count("id")
+    )
+
+    prev_total = preventative["total"] or Decimal(0)
+    react_total = reactive["total"] or Decimal(0)
+
+    return {
+        "preventative_spending": float(prev_total),
+        "preventative_count": preventative["count"] or 0,
+        "reactive_spending": float(react_total),
+        "reactive_count": reactive["count"] or 0,
+        "total_maintenance": float(prev_total + react_total),
+        "preventative_percentage": round(
+            float(prev_total / (prev_total + react_total) * 100) if (prev_total + react_total) > 0 else 0, 1
+        ),
+        "top_costs": list(
+            records.values("description").annotate(total=Sum("amount")).order_by("-total")[:5]
+        ),
+    }
+
+
+def _generate_tax_compliance_report(landlord):
+    """Generate tax-ready P&L and expense categorization."""
+    payments = Payment.objects.filter(landlord=landlord, status=Payment.Status.SUCCEEDED)
+    
+    # Income by category
+    income = payments.filter(category="rent").aggregate(total=Sum("amount"))["total"] or Decimal(0)
+    
+    # Expenses by category
+    expenses = {}
+    for category in ["maintenance", "utilities", "tax", "other"]:
+        cat_total = payments.filter(category=category).aggregate(total=Sum("amount"))["total"] or Decimal(0)
+        expenses[category] = float(cat_total)
+    
+    # Maintenance records (fixed expenses)
+    maintenance_total = MaintenanceRecord.objects.filter(landlord=landlord).aggregate(
+        total=Sum("amount")
+    )["total"] or Decimal(0)
+    expenses["maintenance"] = float(maintenance_total)
+    
+    total_expenses = sum(expenses.values())
+    net_profit = float(income) - total_expenses
+    
+    return {
+        "gross_income": float(income),
+        "expenses": expenses,
+        "total_expenses": total_expenses,
+        "net_profit": net_profit,
+        "profit_margin": round((net_profit / float(income) * 100) if income > 0 else 0, 1),
+    }
+
+
+class DelinquencyAnalyticsView(AuthenticatedAPIView):
+    """Collection intelligence: delinquency tracking and metrics."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Delinquency analytics requires the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _calculate_delinquency_stats(request.user)
+        return Response(data)
+
+
+class CashFlowForecastView(AuthenticatedAPIView):
+    """Cash flow forecasting for next 6 months."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Cash flow forecasting requires the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _calculate_cash_flow_forecast(request.user)
+        return Response({"forecast": data})
+
+
+class PropertyROIView(AuthenticatedAPIView):
+    """ROI and performance analysis by property."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Property ROI analysis requires the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _calculate_property_roi(request.user)
+        return Response({"properties": data})
+
+
+class TenantRiskScoringView(AuthenticatedAPIView):
+    """Tenant payment reliability and risk scoring."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Tenant risk scoring requires the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _calculate_tenant_risk_scores(request.user)
+        return Response({"tenants": data})
+
+
+class MaintenanceIntelligenceView(AuthenticatedAPIView):
+    """Maintenance cost analysis and patterns."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Maintenance intelligence requires the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _calculate_maintenance_intelligence(request.user)
+        return Response(data)
+
+
+class TaxComplianceReportView(AuthenticatedAPIView):
+    """Tax-ready P&L statements and expense categorization."""
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not _has_feature(request.user, "analytics"):
+            return Response(
+                {"detail": "Tax compliance reports require the Pro plan or Analytics add-on."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        data = _generate_tax_compliance_report(request.user)
+        
+        fmt = request.query_params.get("format", "json")
+        if fmt == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["Category", "Amount"])
+            writer.writerow(["Gross Income", data["gross_income"]])
+            for category, amount in data["expenses"].items():
+                writer.writerow([f"  {category.title()}", amount])
+            writer.writerow(["Total Expenses", data["total_expenses"]])
+            writer.writerow(["Net Profit", data["net_profit"]])
+            writer.writerow(["Profit Margin %", data["profit_margin"]])
+            
+            response = HttpResponse(output.getvalue(), content_type="text/csv")
+            response["Content-Disposition"] = f'attachment; filename="tax_report_{date.today()}.csv"'
+            return response
+        
+        return Response(data)

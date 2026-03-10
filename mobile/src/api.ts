@@ -335,3 +335,73 @@ export function exportPayments(token: string, from?: string, to?: string) {
   params.set("format", "json");
   return request<Array<Record<string, unknown>>>(`/landlord/reports/export/?${params.toString()}`, undefined, token);
 }
+
+// Premium analytics endpoints
+export function fetchDelinquencyAnalytics(token: string) {
+  return request<{
+    total_delinquent: number;
+    delinquent_count: number;
+    overdue_30_days: Array<{ tenant: string; unit: string; days_overdue: number; amount: number }>;
+    overdue_60_days: Array<{ tenant: string; unit: string; days_overdue: number; amount: number }>;
+    overdue_90_days: Array<{ tenant: string; unit: string; days_overdue: number; amount: number }>;
+    collection_effectiveness: number;
+  }>("/landlord/analytics/delinquency/", undefined, token);
+}
+
+export function fetchCashFlowForecast(token: string) {
+  return request<{
+    forecast: Array<{
+      month: string;
+      expected_collection: number;
+      confidence: number;
+    }>;
+  }>("/landlord/analytics/cash-flow/", undefined, token);
+}
+
+export function fetchPropertyROI(token: string) {
+  return request<{
+    properties: Array<{
+      property: string;
+      total_collected: number;
+      maintenance_cost: number;
+      net_income: number;
+      occupancy_rate: number;
+      units: number;
+    }>;
+  }>("/landlord/analytics/roi/", undefined, token);
+}
+
+export function fetchTenantRiskScoring(token: string) {
+  return request<{
+    tenants: Array<{
+      tenant: string;
+      unit: string;
+      payment_reliability: number;
+      on_time_payments: number;
+      late_payments: number;
+      risk_level: "low" | "medium" | "high";
+    }>;
+  }>("/landlord/analytics/tenant-risk/", undefined, token);
+}
+
+export function fetchMaintenanceIntelligence(token: string) {
+  return request<{
+    preventative_spending: number;
+    preventative_count: number;
+    reactive_spending: number;
+    reactive_count: number;
+    total_maintenance: number;
+    preventative_percentage: number;
+    top_costs: Array<{ description: string; total: number }>;
+  }>("/landlord/analytics/maintenance/", undefined, token);
+}
+
+export function fetchTaxComplianceReport(token: string) {
+  return request<{
+    gross_income: number;
+    expenses: Record<string, number>;
+    total_expenses: number;
+    net_profit: number;
+    profit_margin: number;
+  }>("/landlord/analytics/tax-report/", undefined, token);
+}

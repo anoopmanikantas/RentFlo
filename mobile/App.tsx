@@ -51,6 +51,12 @@ import {
   confirmAddOn,
   fetchAnalytics,
   exportPayments,
+  fetchDelinquencyAnalytics,
+  fetchCashFlowForecast,
+  fetchPropertyROI,
+  fetchTenantRiskScoring,
+  fetchMaintenanceIntelligence,
+  fetchTaxComplianceReport,
   type SubscriptionResponse,
   type SubscriptionInfo,
   type Plan,
@@ -1337,7 +1343,7 @@ function ThemeToggle() {
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
   const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
-  type ScreenType = "dashboard" | "plans" | "analytics";
+  type ScreenType = "dashboard" | "plans" | "analytics" | "delinquency" | "cashflow" | "roi" | "tenant-risk" | "maintenance" | "tax-report";
   const [activeForm, setActiveForm] = useState<FormType>(null);
   const [screen, setScreen] = useState<ScreenType>("dashboard");
   const [formBusy, setFormBusy] = useState(false);
@@ -1367,7 +1373,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   async function handleExportPayments() {
     setExportBusy(true);
     try {
-      const csv = await exportPayments(token, { format: "csv" });
+      const csv = await exportPayments(token);
       // In a real app, this would save to device file system or share
       // For now, just log success
       console.log("CSV export:", csv.slice(0, 100) + "...");
@@ -1390,7 +1396,25 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
     return <PlansScreen token={token} onBack={() => setScreen("dashboard")} onRefresh={onRefresh} />;
   }
   if (screen === "analytics") {
-    return <AnalyticsScreen token={token} onBack={() => setScreen("dashboard")} />;
+    return <AnalyticsScreen token={token} onBack={() => setScreen("dashboard")} onNavigate={(s: any) => setScreen(s)} />;
+  }
+  if (screen === "delinquency") {
+    return <DelinquencyAnalyticsScreen token={token} onBack={() => setScreen("analytics")} />;
+  }
+  if (screen === "cashflow") {
+    return <CashFlowForecastScreen token={token} onBack={() => setScreen("analytics")} />;
+  }
+  if (screen === "roi") {
+    return <PropertyROIScreen token={token} onBack={() => setScreen("analytics")} />;
+  }
+  if (screen === "tenant-risk") {
+    return <TenantRiskScoringScreen token={token} onBack={() => setScreen("analytics")} />;
+  }
+  if (screen === "maintenance") {
+    return <MaintenanceIntelligenceScreen token={token} onBack={() => setScreen("analytics")} />;
+  }
+  if (screen === "tax-report") {
+    return <TaxComplianceReportScreen token={token} onBack={() => setScreen("analytics")} />;
   }
 
   return (
@@ -1973,7 +1997,7 @@ function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () =
 // Analytics screen (premium)
 // ---------------------------------------------------------------------------
 
-function AnalyticsScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function AnalyticsScreen({ token, onBack, onNavigate }: { token: string; onBack: () => void; onNavigate?: (screen: string) => void }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
@@ -2047,6 +2071,49 @@ function AnalyticsScreen({ token, onBack }: { token: string; onBack: () => void 
               value={money(analyticsData.monthly_collected)}
               note={analyticsData.current_month}
             />
+          </View>
+
+          {/* Premium analytics drilldowns */}
+          <View style={styles.panel}>
+            <Text style={[styles.analyticsLabel, { marginBottom: 12 }]}>Deep Dive Analytics</Text>
+            <View style={{ gap: 8 }}>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("delinquency")}
+              >
+                <Text style={{ fontSize: 14 }}>⚠️ Delinquency & Collections</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("cashflow")}
+              >
+                <Text style={{ fontSize: 14 }}>💰 Cash Flow Forecasting</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("roi")}
+              >
+                <Text style={{ fontSize: 14 }}>🏆 Property ROI Analysis</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("tenant-risk")}
+              >
+                <Text style={{ fontSize: 14 }}>👥 Tenant Risk Scoring</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("maintenance")}
+              >
+                <Text style={{ fontSize: 14 }}>🔧 Maintenance Intelligence</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionChip, { paddingHorizontal: 12, paddingVertical: 10, width: "100%" }]}
+                onPress={() => onNavigate?.("tax-report")}
+              >
+                <Text style={{ fontSize: 14 }}>📋 Tax Compliance Reports</Text>
+              </Pressable>
+            </View>
           </View>
 
           {/* Revenue trend bar chart */}
@@ -2384,6 +2451,471 @@ function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; 
       <Text style={{ fontSize: 16 }}>{icon}</Text>
       <Text style={[styles.actionChipText, active && styles.actionChipTextActive]}>{label}</Text>
     </Pressable>
+  );
+}
+
+// ============================================================================
+// PREMIUM ANALYTICS DETAIL SCREENS
+// ============================================================================
+
+function DelinquencyAnalyticsScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchDelinquencyAnalytics(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="⚠️" label="Delinquency" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Insights</Text>
+            <Text style={styles.panelTitle}>Delinquency & Collection Intelligence</Text>
+          </View>
+
+          <View style={styles.summaryGrid}>
+            <SummaryCard label="At Risk" value={`${data.delinquent_count}`} note="overdue units" />
+            <SummaryCard label="Total Overdue" value={money(data.total_delinquent)} note="amount" />
+            <SummaryCard label="Collection Rate" value={`${data.collection_effectiveness.toFixed(1)}%`} note="effectiveness" />
+          </View>
+
+          {data.overdue_90_days.length > 0 && (
+            <View style={styles.panel}>
+              <Text style={[styles.analyticsLabel, { color: t.danger }]}>90+ Days Overdue</Text>
+              <View style={styles.tableLike}>
+                {data.overdue_90_days.map((item: any, i: number) => (
+                  <View key={i} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{item.tenant}</Text>
+                      <Text style={styles.rowMeta}>{item.unit}</Text>
+                    </View>
+                    <View style={styles.tableNumbers}>
+                      <Text style={[styles.rowValue, { color: t.danger }]}>{item.days_overdue}d</Text>
+                      <Text style={styles.rowMeta}>{money(item.amount)}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {data.overdue_60_days.length > 0 && (
+            <View style={styles.panel}>
+              <Text style={[styles.analyticsLabel, { color: t.warning }]}>60+ Days Overdue</Text>
+              <View style={styles.tableLike}>
+                {data.overdue_60_days.map((item: any, i: number) => (
+                  <View key={i} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{item.tenant}</Text>
+                      <Text style={styles.rowMeta}>{item.unit}</Text>
+                    </View>
+                    <View style={styles.tableNumbers}>
+                      <Text style={[styles.rowValue, { color: t.warning }]}>{item.days_overdue}d</Text>
+                      <Text style={styles.rowMeta}>{money(item.amount)}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {data.overdue_30_days.length > 0 && (
+            <View style={styles.panel}>
+              <Text style={styles.analyticsLabel}>30+ Days Overdue</Text>
+              <View style={styles.tableLike}>
+                {data.overdue_30_days.map((item: any, i: number) => (
+                  <View key={i} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{item.tenant}</Text>
+                      <Text style={styles.rowMeta}>{item.unit}</Text>
+                    </View>
+                    <View style={styles.tableNumbers}>
+                      <Text style={styles.rowValue}>{item.days_overdue}d</Text>
+                      <Text style={styles.rowMeta}>{money(item.amount)}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function CashFlowForecastScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchCashFlowForecast(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="💰" label="Cash Flow" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data?.forecast ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Forecast</Text>
+            <Text style={styles.panelTitle}>6-Month Cash Flow Projection</Text>
+          </View>
+
+          {(() => {
+            const maxVal = Math.max(...data.forecast.map((m: any) => m.expected_collection), 1);
+            return (
+              <>
+                <View style={styles.barChartRow}>
+                  {data.forecast.map((m: any) => {
+                    const pct = (m.expected_collection / maxVal) * 100;
+                    return (
+                      <View key={m.month} style={{ flex: 1, alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                        <View style={[styles.barChartBar, { height: `${Math.max(pct, 3)}%` }]} />
+                      </View>
+                    );
+                  })}
+                </View>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {data.forecast.map((m: any) => (
+                    <View key={m.month} style={{ flex: 1, alignItems: "center" }}>
+                      <Text style={styles.barChartLabel}>{m.month.slice(5)}</Text>
+                      <Text style={[styles.barChartLabel, { fontWeight: "700", color: t.text }]}>
+                        {money(m.expected_collection)}
+                      </Text>
+                      <Text style={[styles.barChartLabel, { fontSize: 10, color: t.textSecondary }]}>
+                        {m.confidence}% confidence
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </>
+            );
+          })()}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function PropertyROIScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchPropertyROI(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="🏆" label="ROI Analysis" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data?.properties ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Performance</Text>
+            <Text style={styles.panelTitle}>Property ROI & Metrics</Text>
+          </View>
+
+          <View style={styles.tableLike}>
+            {data.properties.map((prop: any, i: number) => (
+              <View key={i} style={styles.panel}>
+                <Text style={styles.rowTitle}>{prop.property}</Text>
+                <View style={{ marginTop: 12, gap: 8 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <Text style={styles.rowMeta}>Collected</Text>
+                    <Text style={styles.rowValue}>{money(prop.total_collected)}</Text>
+                  </View>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <Text style={styles.rowMeta}>Maintenance cost</Text>
+                    <Text style={styles.rowValue}>{money(prop.maintenance_cost)}</Text>
+                  </View>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", paddingTop: 8, borderTopWidth: 1, borderTopColor: t.border }}>
+                    <Text style={[styles.rowMeta, { fontWeight: "700" }]}>Net income</Text>
+                    <Text style={[styles.rowValue, { fontWeight: "700", color: prop.net_income > 0 ? t.success : t.danger }]}>
+                      {money(prop.net_income)}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
+                    <Text style={styles.rowMeta}>Occupancy</Text>
+                    <Text style={styles.rowValue}>{prop.occupancy_rate.toFixed(0)}% ({prop.units} units)</Text>
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function TenantRiskScoringScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchTenantRiskScoring(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  function getRiskColor(level: string) {
+    if (level === "low") return t.success;
+    if (level === "medium") return t.warning;
+    return t.danger;
+  }
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="👥" label="Tenant Risk" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data?.tenants ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Reliability</Text>
+            <Text style={styles.panelTitle}>Tenant Risk Scoring</Text>
+          </View>
+
+          <View style={styles.tableLike}>
+            {data.tenants.map((tenant: any, i: number) => (
+              <View key={i} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{tenant.tenant}</Text>
+                  <Text style={styles.rowMeta}>{tenant.unit}</Text>
+                </View>
+                <View style={styles.tableNumbers}>
+                  <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+                    <Text style={[styles.rowValue, { color: getRiskColor(tenant.risk_level) }]}>
+                      {tenant.payment_reliability}%
+                    </Text>
+                    <View style={[styles.badge, { backgroundColor: getRiskColor(tenant.risk_level) + "20" }]}>
+                      <Text style={[styles.badgeText, { color: getRiskColor(tenant.risk_level) }]}>
+                        {tenant.risk_level}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.rowMeta}>{tenant.on_time_payments} on-time, {tenant.late_payments} late</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function MaintenanceIntelligenceScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchMaintenanceIntelligence(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="🔧" label="Maintenance" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Insights</Text>
+            <Text style={styles.panelTitle}>Maintenance Intelligence</Text>
+          </View>
+
+          <View style={styles.summaryGrid}>
+            <SummaryCard
+              label="Total Spending"
+              value={money(data.total_maintenance)}
+              note="all maintenance"
+            />
+            <SummaryCard
+              label="Preventative"
+              value={`${data.preventative_percentage}%`}
+              note={`${data.preventative_count} tasks`}
+            />
+            <SummaryCard
+              label="Reactive"
+              value={`${(100 - data.preventative_percentage).toFixed(1)}%`}
+              note={`${data.reactive_count} tasks`}
+            />
+          </View>
+
+          {data.top_costs?.length > 0 && (
+            <View style={styles.panel}>
+              <Text style={styles.analyticsLabel}>Top Maintenance Items</Text>
+              <View style={styles.tableLike}>
+                {data.top_costs.map((item: any, i: number) => (
+                  <View key={i} style={styles.tableRow}>
+                    <Text style={styles.rowTitle}>{item.description}</Text>
+                    <Text style={styles.rowValue}>{money(item.total)}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function TaxComplianceReportScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    fetchTaxComplianceReport(token)
+      .then(setData)
+      .catch((e) => setMsg(readError(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
+        <ActionChip icon="📋" label="Tax Report" active={true} onPress={() => {}} />
+      </View>
+
+      {loading ? (
+        <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+          <ActivityIndicator color={t.accent} size="large" />
+        </View>
+      ) : msg ? (
+        <View style={styles.panel}>
+          <Text style={styles.helper}>{msg}</Text>
+        </View>
+      ) : data ? (
+        <>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Filing Ready</Text>
+            <Text style={styles.panelTitle}>Tax Compliance P&L</Text>
+          </View>
+
+          <View style={styles.panel}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+              <Text style={styles.rowTitle}>Gross Income</Text>
+              <Text style={[styles.rowValue, { color: t.success }]}>{money(data.gross_income)}</Text>
+            </View>
+
+            <View style={{ borderTopWidth: 1, borderTopColor: t.border, paddingTop: 12 }}>
+              <Text style={[styles.rowMeta, { marginBottom: 12, fontWeight: "600" }]}>Expenses Breakdown</Text>
+              {Object.entries(data.expenses).map(([cat, amount]: [string, any]) => (
+                <View key={cat} style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 8 }}>
+                  <Text style={styles.rowMeta}>{cat.charAt(0).toUpperCase() + cat.slice(1)}</Text>
+                  <Text style={styles.rowValue}>{money(amount)}</Text>
+                </View>
+              ))}
+            </View>
+
+            <View style={{ borderTopWidth: 1, borderTopColor: t.border, marginTop: 12, paddingTop: 12 }}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                <Text style={[styles.rowTitle, { fontWeight: "700" }]}>Total Expenses</Text>
+                <Text style={[styles.rowValue, { fontWeight: "700" }]}>{money(data.total_expenses)}</Text>
+              </View>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
+                <Text style={[styles.rowTitle, { fontWeight: "700" }]}>Net Profit</Text>
+                <Text style={[styles.rowValue, { fontWeight: "700", color: data.net_profit > 0 ? t.success : t.danger }]}>
+                  {money(data.net_profit)}
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
+                <Text style={styles.rowMeta}>Profit Margin</Text>
+                <Text style={[styles.rowValue, { color: t.accent }]}>{data.profit_margin}%</Text>
+              </View>
+            </View>
+          </View>
+        </>
+      ) : null}
+    </View>
   );
 }
 

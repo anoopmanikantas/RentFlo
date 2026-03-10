@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     ActivateAddOnView,
     AnalyticsDashboardView,
+    CashFlowForecastView,
     ConfirmAddOnView,
     ConfirmTenantPaymentView,
     ConfirmUpgradeView,
@@ -10,16 +11,21 @@ from .views import (
     CreateBuildingView,
     CreateTenancyView,
     CreateUnitView,
+    DelinquencyAnalyticsView,
     EndTenancyView,
     GoogleLoginView,
     InitiateTenantPaymentView,
     LandlordDashboardView,
     LoginView,
+    MaintenanceIntelligenceView,
     MeView,
     PaymentReportExportView,
+    PropertyROIView,
     SignupView,
     SubscriptionView,
+    TaxComplianceReportView,
     TenantDashboardView,
+    TenantRiskScoringView,
     UpgradeSubscriptionView,
 )
 
@@ -44,6 +50,13 @@ urlpatterns = [
     # Premium features
     path("landlord/analytics/", AnalyticsDashboardView.as_view(), name="api-analytics"),
     path("landlord/reports/export/", PaymentReportExportView.as_view(), name="api-reports-export"),
+    # Premium analytics endpoints
+    path("landlord/analytics/delinquency/", DelinquencyAnalyticsView.as_view(), name="api-analytics-delinquency"),
+    path("landlord/analytics/cash-flow/", CashFlowForecastView.as_view(), name="api-analytics-cashflow"),
+    path("landlord/analytics/roi/", PropertyROIView.as_view(), name="api-analytics-roi"),
+    path("landlord/analytics/tenant-risk/", TenantRiskScoringView.as_view(), name="api-analytics-tenant-risk"),
+    path("landlord/analytics/maintenance/", MaintenanceIntelligenceView.as_view(), name="api-analytics-maintenance"),
+    path("landlord/analytics/tax-report/", TaxComplianceReportView.as_view(), name="api-analytics-tax"),
     # Tenant
     path("tenant/dashboard/", TenantDashboardView.as_view(), name="api-tenant-dashboard"),
     path("tenant/payments/initiate/", InitiateTenantPaymentView.as_view(), name="api-tenant-payment-initiate"),
