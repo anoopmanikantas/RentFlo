@@ -364,12 +364,12 @@ export default function App() {
         <View style={styles.hero}>
           <View>
             <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
-            <Text style={styles.title}>RentFlow</Text>
+            <Text style={styles.title}>RentFlo</Text>
             <Text style={styles.subtitle}>
               One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
             </Text>
             <Text style={styles.note}>
-              API base URL: {Platform.OS === "web" ? "http://localhost:8000/api" : "Set EXPO_PUBLIC_API_URL"}
+              API base URL: {Platform.OS === "web" ? "http://localhost:8085/api" : "Set EXPO_PUBLIC_API_URL"}
             </Text>
           </View>
           <View style={styles.roleCard}>
@@ -488,25 +488,35 @@ export default function App() {
 }
 
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
-  const [showAddBuilding, setShowAddBuilding] = useState(false);
-  const [showAddUnit, setShowAddUnit] = useState(false);
-  const [showAddBank, setShowAddBank] = useState(false);
-  const [showAddTenancy, setShowAddTenancy] = useState(false);
+  type FormType = null | "building" | "unit" | "bank" | "tenancy";
+  const [activeForm, setActiveForm] = useState<FormType>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
 
-  // Form states
+  // Building form
   const [bName, setBName] = useState("");
   const [bAddress, setBAddress] = useState("");
-  const [uBuildingId, setUBuildingId] = useState("");
+  // Unit form
+  const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(null);
   const [uLabel, setULabel] = useState("");
   const [uRent, setURent] = useState("");
+  // Bank form
   const [bankName, setBankName] = useState("");
   const [accName, setAccName] = useState("");
   const [accNumber, setAccNumber] = useState("");
   const [ifsc, setIfsc] = useState("");
+  // Tenancy form
   const [tenantEmail, setTenantEmail] = useState("");
-  const [tenantUnitId, setTenantUnitId] = useState("");
+  const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
+
+  function openForm(form: FormType) {
+    setActiveForm(activeForm === form ? null : form);
+    setFormMsg("");
+  }
+
+  const unoccupiedUnits = data.units.filter(
+    (u) => !data.tenants.some((t) => t.unit_label === u.label && t.building_name === u.building_name),
+  );
 
   return (
     <View style={styles.stack}>
@@ -517,97 +527,148 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         <SummaryCard label="Outstanding" value={money(data.summary.monthly_outstanding)} note={`${money(data.summary.monthly_collected)} collected`} />
       </View>
 
-      {/* Quick-add actions */}
+      {/* Quick actions bar */}
       <View style={styles.panel}>
         <Text style={styles.sectionKicker}>Manage</Text>
-        <Text style={styles.panelTitle}>Add properties & tenants</Text>
-        {formMsg ? <Text style={styles.helper}>{formMsg}</Text> : null}
+        <Text style={styles.panelTitle}>Quick actions</Text>
+        {formMsg ? (
+          <View style={[styles.banner, { marginBottom: 2 }]}>
+            <Text style={styles.bannerText}>{formMsg}</Text>
+          </View>
+        ) : null}
 
-        <View style={{ gap: 8 }}>
-          <PrimaryButton label={showAddBuilding ? "Cancel" : "+ Add building"} onPress={() => { setShowAddBuilding(!showAddBuilding); setFormMsg(""); }} variant={showAddBuilding ? "secondary" : "primary"} />
-          {showAddBuilding && (
-            <View style={styles.formGrid}>
-              <Field label="Building name" value={bName} onChangeText={setBName} />
-              <Field label="Address" value={bAddress} onChangeText={setBAddress} />
-              <PrimaryButton label={formBusy ? "Creating..." : "Create building"} disabled={formBusy} onPress={async () => {
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+          <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
+          <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
+          <ActionChip icon="🏦" label="Bank account" active={activeForm === "bank"} onPress={() => openForm("bank")} />
+          <ActionChip icon="👤" label="Assign tenant" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} disabled={unoccupiedUnits.length === 0} />
+        </View>
+
+        {/* Building form */}
+        {activeForm === "building" && (
+          <View style={styles.inlineForm}>
+            <Text style={styles.inlineFormTitle}>New building</Text>
+            <Field label="Name" value={bName} onChangeText={setBName} />
+            <Field label="Address" value={bAddress} onChangeText={setBAddress} />
+            <PrimaryButton
+              label={formBusy ? "Creating..." : "Create building"}
+              disabled={formBusy || !bName.trim()}
+              onPress={async () => {
                 setFormBusy(true);
                 try {
                   await createBuilding(token, { name: bName, address: bAddress });
-                  setFormMsg(`Building "${bName}" created!`);
-                  setBName(""); setBAddress(""); setShowAddBuilding(false);
+                  setFormMsg(`✓ Building "${bName}" created`);
+                  setBName(""); setBAddress(""); setActiveForm(null);
                   onRefresh();
                 } catch (e) { setFormMsg(readError(e)); }
                 setFormBusy(false);
-              }} />
-            </View>
-          )}
+              }}
+            />
+          </View>
+        )}
 
-          <PrimaryButton label={showAddUnit ? "Cancel" : "+ Add unit"} onPress={() => { setShowAddUnit(!showAddUnit); setFormMsg(""); }} variant={showAddUnit ? "secondary" : "primary"} />
-          {showAddUnit && (
-            <View style={styles.formGrid}>
-              <Text style={styles.helper}>
-                Buildings: {data.buildings.map((b) => `${b.id}: ${b.name}`).join(" • ")}
-              </Text>
-              <Field label="Building ID" value={uBuildingId} onChangeText={setUBuildingId} keyboardType="numeric" />
-              <Field label="Unit label (e.g. 2B)" value={uLabel} onChangeText={setULabel} />
-              <Field label="Monthly rent" value={uRent} onChangeText={setURent} keyboardType="numeric" />
-              <PrimaryButton label={formBusy ? "Creating..." : "Create unit"} disabled={formBusy} onPress={async () => {
+        {/* Unit form — pick building visually */}
+        {activeForm === "unit" && (
+          <View style={styles.inlineForm}>
+            <Text style={styles.inlineFormTitle}>New unit</Text>
+            <Text style={styles.fieldLabel}>Select building</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {data.buildings.map((b) => (
+                <Pressable
+                  key={b.id}
+                  style={[styles.selectChip, selectedBuildingId === b.id && styles.selectChipActive]}
+                  onPress={() => setSelectedBuildingId(b.id)}
+                >
+                  <Text style={[styles.selectChipText, selectedBuildingId === b.id && styles.selectChipTextActive]}>
+                    {b.name}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Field label="Unit label (e.g. 2B, Ground Floor)" value={uLabel} onChangeText={setULabel} />
+            <Field label="Monthly rent (₹)" value={uRent} onChangeText={setURent} keyboardType="numeric" />
+            <PrimaryButton
+              label={formBusy ? "Creating..." : "Create unit"}
+              disabled={formBusy || !selectedBuildingId || !uLabel.trim() || !uRent.trim()}
+              onPress={async () => {
                 setFormBusy(true);
                 try {
-                  await createUnit(token, { building_id: Number(uBuildingId), label: uLabel, monthly_rent: uRent });
-                  setFormMsg(`Unit "${uLabel}" created!`);
-                  setUBuildingId(""); setULabel(""); setURent(""); setShowAddUnit(false);
+                  await createUnit(token, { building_id: selectedBuildingId!, label: uLabel, monthly_rent: uRent });
+                  setFormMsg(`✓ Unit "${uLabel}" created`);
+                  setSelectedBuildingId(null); setULabel(""); setURent(""); setActiveForm(null);
                   onRefresh();
                 } catch (e) { setFormMsg(readError(e)); }
                 setFormBusy(false);
-              }} />
-            </View>
-          )}
+              }}
+            />
+          </View>
+        )}
 
-          <PrimaryButton label={showAddBank ? "Cancel" : "+ Add bank account"} onPress={() => { setShowAddBank(!showAddBank); setFormMsg(""); }} variant={showAddBank ? "secondary" : "primary"} />
-          {showAddBank && (
-            <View style={styles.formGrid}>
-              <Field label="Bank name" value={bankName} onChangeText={setBankName} />
-              <Field label="Account name" value={accName} onChangeText={setAccName} />
-              <Field label="Account number" value={accNumber} onChangeText={setAccNumber} />
-              <Field label="IFSC" value={ifsc} onChangeText={setIfsc} />
-              <PrimaryButton label={formBusy ? "Creating..." : "Create bank account"} disabled={formBusy} onPress={async () => {
+        {/* Bank account form */}
+        {activeForm === "bank" && (
+          <View style={styles.inlineForm}>
+            <Text style={styles.inlineFormTitle}>New bank account</Text>
+            <Field label="Bank name" value={bankName} onChangeText={setBankName} />
+            <Field label="Account holder name" value={accName} onChangeText={setAccName} />
+            <Field label="Account number" value={accNumber} onChangeText={setAccNumber} keyboardType="numeric" />
+            <Field label="IFSC code (optional)" value={ifsc} onChangeText={setIfsc} />
+            <PrimaryButton
+              label={formBusy ? "Creating..." : "Add bank account"}
+              disabled={formBusy || !bankName.trim() || !accNumber.trim()}
+              onPress={async () => {
                 setFormBusy(true);
                 try {
                   await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
-                  setFormMsg(`Bank account "${bankName}" added!`);
-                  setBankName(""); setAccName(""); setAccNumber(""); setIfsc(""); setShowAddBank(false);
+                  setFormMsg(`✓ Bank account added`);
+                  setBankName(""); setAccName(""); setAccNumber(""); setIfsc(""); setActiveForm(null);
                   onRefresh();
                 } catch (e) { setFormMsg(readError(e)); }
                 setFormBusy(false);
-              }} />
-            </View>
-          )}
+              }}
+            />
+          </View>
+        )}
 
-          <PrimaryButton label={showAddTenancy ? "Cancel" : "+ Assign tenant"} onPress={() => { setShowAddTenancy(!showAddTenancy); setFormMsg(""); }} variant={showAddTenancy ? "secondary" : "primary"} />
-          {showAddTenancy && (
-            <View style={styles.formGrid}>
-              <Text style={styles.helper}>
-                The tenant must have signed up first. Enter their email and choose a unit.
-              </Text>
-              <Text style={styles.helper}>
-                Available units: {data.units.map((u) => `${u.id}: ${u.building_name} / ${u.label}`).join(" • ")}
-              </Text>
-              <Field label="Tenant email" value={tenantEmail} onChangeText={setTenantEmail} />
-              <Field label="Unit ID" value={tenantUnitId} onChangeText={setTenantUnitId} keyboardType="numeric" />
-              <PrimaryButton label={formBusy ? "Assigning..." : "Assign tenant to unit"} disabled={formBusy} onPress={async () => {
+        {/* Assign tenant — pick unit visually */}
+        {activeForm === "tenancy" && (
+          <View style={styles.inlineForm}>
+            <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
+            <Text style={styles.helper}>The tenant must have signed up on RentFlo first.</Text>
+            <Field label="Tenant's email" value={tenantEmail} onChangeText={setTenantEmail} />
+            <Text style={styles.fieldLabel}>Select vacant unit</Text>
+            <View style={{ gap: 6 }}>
+              {unoccupiedUnits.length === 0 ? (
+                <Text style={styles.helper}>All units are occupied. Add a new unit first.</Text>
+              ) : (
+                unoccupiedUnits.map((u) => (
+                  <Pressable
+                    key={u.id}
+                    style={[styles.selectChip, selectedUnitId === u.id && styles.selectChipActive, { paddingVertical: 10 }]}
+                    onPress={() => setSelectedUnitId(u.id)}
+                  >
+                    <Text style={[styles.selectChipText, selectedUnitId === u.id && styles.selectChipTextActive]}>
+                      {u.building_name} / {u.label} — {money(u.monthly_rent)}/mo
+                    </Text>
+                  </Pressable>
+                ))
+              )}
+            </View>
+            <PrimaryButton
+              label={formBusy ? "Assigning..." : "Assign tenant"}
+              disabled={formBusy || !tenantEmail.trim() || !selectedUnitId}
+              onPress={async () => {
                 setFormBusy(true);
                 try {
-                  await createTenancy(token, { tenant_email: tenantEmail, unit_id: Number(tenantUnitId) });
-                  setFormMsg(`Tenant assigned!`);
-                  setTenantEmail(""); setTenantUnitId(""); setShowAddTenancy(false);
+                  await createTenancy(token, { tenant_email: tenantEmail, unit_id: selectedUnitId! });
+                  setFormMsg(`✓ Tenant assigned successfully`);
+                  setTenantEmail(""); setSelectedUnitId(null); setActiveForm(null);
                   onRefresh();
                 } catch (e) { setFormMsg(readError(e)); }
                 setFormBusy(false);
-              }} />
-            </View>
-          )}
-        </View>
+              }}
+            />
+          </View>
+        )}
       </View>
 
       <View style={styles.panel}>
@@ -744,7 +805,7 @@ function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant"
   return (
     <View style={styles.panel}>
       <Text style={styles.sectionKicker}>Welcome</Text>
-      <Text style={styles.panelTitle}>How will you use RentFlow?</Text>
+      <Text style={styles.panelTitle}>How will you use RentFlo?</Text>
       <Text style={styles.helper}>
         Choose your role. You can change this later from your profile.
       </Text>
@@ -788,7 +849,7 @@ function TenantWelcome({ user }: { user: AuthUser }) {
       </Text>
       <View style={styles.summaryCard}>
         <Text style={styles.summaryLabel}>What to do</Text>
-        <Text style={[styles.helper, { marginTop: 8 }]}>1. Ask your landlord to add you on RentFlow</Text>
+        <Text style={[styles.helper, { marginTop: 8 }]}>1. Ask your landlord to add you on RentFlo</Text>
         <Text style={styles.helper}>2. They'll enter your email and assign a unit</Text>
         <Text style={styles.helper}>3. Refresh this page to see your dashboard</Text>
       </View>
@@ -872,6 +933,19 @@ function PrimaryButton({
       disabled={disabled}
     >
       <Text style={textStyle}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; label: string; active: boolean; onPress: () => void; disabled?: boolean }) {
+  return (
+    <Pressable
+      style={[styles.actionChip, active && styles.actionChipActive, disabled && styles.disabledButton]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      <Text style={{ fontSize: 16 }}>{icon}</Text>
+      <Text style={[styles.actionChipText, active && styles.actionChipTextActive]}>{label}</Text>
     </Pressable>
   );
 }
@@ -1187,5 +1261,61 @@ const styles = StyleSheet.create({
     color: "#74695c",
     fontWeight: "700",
     fontSize: 13,
+  },
+  actionChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.18)",
+    backgroundColor: "#fff",
+  },
+  actionChipActive: {
+    backgroundColor: "#b85c38",
+    borderColor: "#b85c38",
+  },
+  actionChipText: {
+    fontWeight: "700",
+    color: "#433123",
+    fontSize: 14,
+  },
+  actionChipTextActive: {
+    color: "#fff",
+  },
+  selectChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.18)",
+    backgroundColor: "#fff",
+  },
+  selectChipActive: {
+    backgroundColor: "#b85c38",
+    borderColor: "#b85c38",
+  },
+  selectChipText: {
+    fontWeight: "700",
+    color: "#433123",
+    fontSize: 14,
+  },
+  selectChipTextActive: {
+    color: "#fff",
+  },
+  inlineForm: {
+    gap: 12,
+    padding: 16,
+    borderRadius: 18,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(67,49,35,0.08)",
+  },
+  inlineFormTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: "#1e1a17",
   },
 });

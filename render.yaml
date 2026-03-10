@@ -1,0 +1,30 @@
+# Render deployment configuration
+# Push to GitHub, then create services from this file at https://dashboard.render.com
+
+databases:
+- name: rentflo-db
+  plan: free
+  databaseName: rentflo
+  user: rentflo
+
+services:
+- type: web
+  name: rentflo-api
+  runtime: python
+  plan: free
+  rootDir: backend
+  buildCommand: chmod +x build.sh && ./build.sh
+  startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+  envVars:
+  - key: DJANGO_SECRET_KEY
+    generateValue: true
+  - key: DJANGO_DEBUG
+    value: "false"
+  - key: DJANGO_ALLOWED_HOSTS
+    value: ".onrender.com"
+  - key: DATABASE_URL
+    fromDatabase:
+      name: rentflo-db
+      property: connectionString
+  - key: GOOGLE_CLIENT_ID
+    sync: false # set manually in Render dashboard

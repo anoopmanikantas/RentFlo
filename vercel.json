@@ -1,0 +1,8 @@
+{
+  "buildCommand": "cd mobile && npm install --legacy-peer-deps && npm run build:web",
+  "outputDirectory": "mobile/dist",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
