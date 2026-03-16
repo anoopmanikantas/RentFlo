@@ -5,7 +5,10 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.authtoken.models import Token
 
-from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG
+from .models import (
+    AddOn, Agreement, BankAccount, Building, Deposit, Offboarding, RazorpayOrder,
+    Payment, Subscription, Tenancy, TenantDocument, Ticket, Unit, User, TIER_LIMITS, ADDON_CATALOG,
+)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -279,4 +282,158 @@ class UpgradeSubscriptionSerializer(serializers.Serializer):
 
 class ActivateAddOnSerializer(serializers.Serializer):
     feature = serializers.ChoiceField(choices=AddOn.Feature.choices)
+
+
+# ---------------------------------------------------------------------------
+# Onboarding serializers
+# ---------------------------------------------------------------------------
+
+class TenantDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenantDocument
+        fields = ("id", "doc_type", "doc_number", "file_url", "verified", "created_at")
+
+
+class UploadDocumentSerializer(serializers.Serializer):
+    doc_type = serializers.ChoiceField(choices=TenantDocument.DocType.choices)
+    doc_number = serializers.CharField(max_length=60, required=False, default="")
+    file_url = serializers.URLField(max_length=500, required=False, default="")
+
+
+class DepositSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Deposit
+        fields = (
+            "id", "amount", "paid_on", "status",
+            "deductions", "deduction_reasons", "refund_amount", "refunded_on",
+        )
+
+
+class CreateDepositSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class PayDepositSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+
+
+class AgreementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Agreement
+        fields = ("id", "agreement_fee", "fee_paid", "signed_date", "document_url", "status")
+
+
+class CreateAgreementSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+    agreement_fee = serializers.DecimalField(max_digits=12, decimal_places=2)
+    document_url = serializers.URLField(max_length=500, required=False, default="")
+
+
+class SignAgreementSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+
+
+class OnboardingStatusSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField(source="id")
+    tenant_name = serializers.CharField(source="tenant_user.get_full_name")
+    unit_label = serializers.CharField(source="unit.label")
+    building_name = serializers.CharField(source="unit.building.name")
+    onboarding_status = serializers.CharField()
+    documents = serializers.SerializerMethodField()
+    deposit = serializers.SerializerMethodField()
+    agreement = serializers.SerializerMethodField()
+
+    def get_documents(self, obj):
+        return TenantDocumentSerializer(obj.documents.all(), many=True).data
+
+    def get_deposit(self, obj):
+        try:
+            return DepositSerializer(obj.deposit).data
+        except Deposit.DoesNotExist:
+            return None
+
+    def get_agreement(self, obj):
+        try:
+            return AgreementSerializer(obj.agreement).data
+        except Agreement.DoesNotExist:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Ticket serializers
+# ---------------------------------------------------------------------------
+
+class TicketSerializer(serializers.ModelSerializer):
+    tenant_name = serializers.CharField(source="tenancy.tenant_user.get_full_name", read_only=True)
+    unit_label = serializers.CharField(source="unit.label", read_only=True)
+    building_name = serializers.CharField(source="unit.building.name", read_only=True)
+
+    class Meta:
+        model = Ticket
+        fields = (
+            "id", "tenant_name", "unit_label", "building_name",
+            "subject", "description", "status", "resolution_provider",
+            "resolution_notes", "receipt_url", "created_at", "updated_at",
+        )
+
+
+class CreateTicketSerializer(serializers.Serializer):
+    subject = serializers.CharField(max_length=200)
+    description = serializers.CharField()
+
+
+class UpdateTicketSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=Ticket.Status.choices, required=False)
+    resolution_provider = serializers.ChoiceField(
+        choices=Ticket.ResolutionProvider.choices, required=False, allow_blank=True,
+    )
+    resolution_notes = serializers.CharField(required=False, allow_blank=True)
+    receipt_url = serializers.URLField(max_length=500, required=False, allow_blank=True)
+
+
+# ---------------------------------------------------------------------------
+# Offboarding serializers
+# ---------------------------------------------------------------------------
+
+class OffboardingSerializer(serializers.ModelSerializer):
+    tenant_name = serializers.CharField(source="tenancy.tenant_user.get_full_name", read_only=True)
+    unit_label = serializers.CharField(source="tenancy.unit.label", read_only=True)
+    building_name = serializers.CharField(source="tenancy.unit.building.name", read_only=True)
+    deposit = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Offboarding
+        fields = (
+            "id", "tenant_name", "unit_label", "building_name",
+            "status", "handoff_document_url", "notes",
+            "deposit", "created_at", "updated_at",
+        )
+
+    def get_deposit(self, obj):
+        try:
+            return DepositSerializer(obj.tenancy.deposit).data
+        except Deposit.DoesNotExist:
+            return None
+
+
+class InitiateOffboardingSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+    deductions = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    deduction_reasons = serializers.CharField(required=False, default="")
+
+
+class SettleDepositSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+    deductions = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    deduction_reasons = serializers.CharField(required=False, default="")
+
+
+class CompleteHandoffSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
+    handoff_document_url = serializers.URLField(max_length=500, required=False, default="")
+
+
+class ConfirmMaintenanceDoneSerializer(serializers.Serializer):
+    tenancy_id = serializers.IntegerField()
 

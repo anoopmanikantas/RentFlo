@@ -1,7 +1,11 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
-from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, MaintenanceRecord
+from .models import (
+    AddOn, Agreement, BankAccount, Building, Deposit, MaintenanceRecord,
+    Offboarding, Payment, RazorpayOrder, Subscription, Tenancy, TenantDocument,
+    Ticket, Unit, User,
+)
 
 
 @admin.register(User)
@@ -30,3 +34,8 @@ admin.site.register(Tenancy)
 admin.site.register(RazorpayOrder)
 admin.site.register(Payment)
 admin.site.register(MaintenanceRecord)
+admin.site.register(TenantDocument)
+admin.site.register(Deposit)
+admin.site.register(Agreement)
+admin.site.register(Ticket)
+admin.site.register(Offboarding)

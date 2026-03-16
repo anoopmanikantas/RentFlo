@@ -12,27 +12,44 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AddOn, BankAccount, Building, RazorpayOrder, Payment, Subscription, Tenancy, Unit, User, TIER_LIMITS, ADDON_CATALOG, MaintenanceRecord
+from .models import AddOn, Agreement, BankAccount, Building, Deposit, Offboarding, RazorpayOrder, Payment, Subscription, Tenancy, TenantDocument, Ticket, Unit, User, TIER_LIMITS, ADDON_CATALOG, MaintenanceRecord
 from .serializers import (
     ActivateAddOnSerializer,
+    AgreementSerializer,
     AuthLoginSerializer,
     BankAccountSerializer,
     BuildingSerializer,
+    CompleteHandoffSerializer,
+    ConfirmMaintenanceDoneSerializer,
     ConfirmPaymentSerializer,
+    CreateAgreementSerializer,
     CreateBankAccountSerializer,
     CreateBuildingSerializer,
+    CreateDepositSerializer,
     CreateTenancySerializer,
+    CreateTicketSerializer,
     CreateUnitSerializer,
+    DepositSerializer,
     GoogleLoginSerializer,
+    InitiateOffboardingSerializer,
     InitiatePaymentSerializer,
+    OffboardingSerializer,
+    OnboardingStatusSerializer,
+    PayDepositSerializer,
     PaymentSerializer,
     PlanSerializer,
+    SettleDepositSerializer,
+    SignAgreementSerializer,
     SignupSerializer,
     SubscriptionSerializer,
+    TenantDocumentSerializer,
     TenantSummarySerializer,
+    TicketSerializer,
     UnitSerializer,
     UpdateRoleSerializer,
+    UpdateTicketSerializer,
     UpgradeSubscriptionSerializer,
+    UploadDocumentSerializer,
     UserSerializer,
 )
 from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
@@ -506,7 +523,10 @@ class CreateTenancyView(AuthenticatedAPIView):
             tenant_user=tenant,
             unit=unit,
             start_date=date.today(),
+            onboarding_status=Tenancy.OnboardingStatus.PENDING_DOCUMENTS,
         )
+        unit.status = Unit.UnitStatus.OCCUPIED
+        unit.save(update_fields=["status", "updated_at"])
         return Response(
             TenantSummarySerializer(tenancy, context={"rent_month": current_month()}).data,
             status=status.HTTP_201_CREATED,
@@ -1217,3 +1237,399 @@ class TaxComplianceReportView(AuthenticatedAPIView):
             return response
         
         return Response(data)
+
+
+# ---------------------------------------------------------------------------
+# Onboarding views
+# ---------------------------------------------------------------------------
+
+class OnboardingStatusView(AuthenticatedAPIView):
+    """GET onboarding status for a tenancy (landlord or tenant)."""
+
+    def get(self, request, tenancy_id):
+        tenancy = Tenancy.objects.select_related(
+            "tenant_user", "unit__building"
+        ).prefetch_related("documents").filter(id=tenancy_id).first()
+        if not tenancy:
+            return Response({"detail": "Tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == User.Role.LANDLORD and tenancy.landlord_id != request.user.id:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role == User.Role.TENANT and tenancy.tenant_user_id != request.user.id:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        return Response(OnboardingStatusSerializer(tenancy).data)
+
+
+class UploadDocumentView(AuthenticatedAPIView):
+    """Tenant uploads an ID/work proof document."""
+
+    def post(self, request, tenancy_id):
+        tenancy = Tenancy.objects.filter(id=tenancy_id, is_active=True).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == User.Role.TENANT and tenancy.tenant_user_id != request.user.id:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role == User.Role.LANDLORD and tenancy.landlord_id != request.user.id:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        ser = UploadDocumentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        doc, created = TenantDocument.objects.update_or_create(
+            tenancy=tenancy,
+            doc_type=ser.validated_data["doc_type"],
+            defaults={
+                "doc_number": ser.validated_data.get("doc_number", ""),
+                "file_url": ser.validated_data.get("file_url", ""),
+            },
+        )
+        # Auto-advance onboarding if at least one ID proof uploaded
+        if tenancy.onboarding_status == Tenancy.OnboardingStatus.PENDING_DOCUMENTS:
+            id_docs = tenancy.documents.filter(
+                doc_type__in=[TenantDocument.DocType.AADHAR, TenantDocument.DocType.PAN]
+            ).count()
+            if id_docs >= 1:
+                tenancy.onboarding_status = Tenancy.OnboardingStatus.PENDING_DEPOSIT
+                tenancy.save(update_fields=["onboarding_status", "updated_at"])
+
+        return Response(TenantDocumentSerializer(doc).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class VerifyDocumentView(AuthenticatedAPIView):
+    """Landlord verifies a tenant document."""
+
+    def post(self, request, tenancy_id, doc_id):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        doc = TenantDocument.objects.filter(
+            id=doc_id, tenancy_id=tenancy_id, tenancy__landlord=request.user
+        ).first()
+        if not doc:
+            return Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
+        doc.verified = True
+        doc.save(update_fields=["verified", "updated_at"])
+        return Response(TenantDocumentSerializer(doc).data)
+
+
+class CreateDepositView(AuthenticatedAPIView):
+    """Landlord sets the deposit amount for a tenancy."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = CreateDepositSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user, is_active=True
+        ).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        deposit, created = Deposit.objects.update_or_create(
+            tenancy=tenancy,
+            defaults={"amount": ser.validated_data["amount"]},
+        )
+        return Response(DepositSerializer(deposit).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class PayDepositView(AuthenticatedAPIView):
+    """Mark deposit as paid (by tenant or landlord)."""
+
+    def post(self, request):
+        ser = PayDepositSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(id=ser.validated_data["tenancy_id"], is_active=True).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id not in (tenancy.landlord_id, tenancy.tenant_user_id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            deposit = tenancy.deposit
+        except Deposit.DoesNotExist:
+            return Response({"detail": "No deposit configured for this tenancy."}, status=status.HTTP_400_BAD_REQUEST)
+        deposit.status = Deposit.Status.PAID
+        deposit.paid_on = date.today()
+        deposit.save(update_fields=["status", "paid_on", "updated_at"])
+        # Advance onboarding
+        if tenancy.onboarding_status == Tenancy.OnboardingStatus.PENDING_DEPOSIT:
+            tenancy.onboarding_status = Tenancy.OnboardingStatus.PENDING_AGREEMENT
+            tenancy.save(update_fields=["onboarding_status", "updated_at"])
+        return Response(DepositSerializer(deposit).data)
+
+
+class CreateAgreementView(AuthenticatedAPIView):
+    """Landlord creates an agreement for a tenancy."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = CreateAgreementSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user, is_active=True
+        ).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        agreement, created = Agreement.objects.update_or_create(
+            tenancy=tenancy,
+            defaults={
+                "agreement_fee": ser.validated_data["agreement_fee"],
+                "document_url": ser.validated_data.get("document_url", ""),
+                "status": Agreement.Status.PENDING_SIGNATURE,
+            },
+        )
+        return Response(AgreementSerializer(agreement).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class SignAgreementView(AuthenticatedAPIView):
+    """Tenant signs the agreement (marks fee as paid)."""
+
+    def post(self, request):
+        ser = SignAgreementSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(id=ser.validated_data["tenancy_id"], is_active=True).first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id not in (tenancy.landlord_id, tenancy.tenant_user_id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            agreement = tenancy.agreement
+        except Agreement.DoesNotExist:
+            return Response({"detail": "No agreement created for this tenancy."}, status=status.HTTP_400_BAD_REQUEST)
+        agreement.fee_paid = True
+        agreement.signed_date = date.today()
+        agreement.status = Agreement.Status.SIGNED
+        agreement.save(update_fields=["fee_paid", "signed_date", "status", "updated_at"])
+        # Advance onboarding
+        if tenancy.onboarding_status == Tenancy.OnboardingStatus.PENDING_AGREEMENT:
+            tenancy.onboarding_status = Tenancy.OnboardingStatus.PENDING_FIRST_RENT
+            tenancy.save(update_fields=["onboarding_status", "updated_at"])
+        return Response(AgreementSerializer(agreement).data)
+
+
+# ---------------------------------------------------------------------------
+# Post-Onboarding – Ticket views
+# ---------------------------------------------------------------------------
+
+class CreateTicketView(AuthenticatedAPIView):
+    """Tenant raises a ticket about a unit concern."""
+
+    def post(self, request):
+        if request.user.role != User.Role.TENANT:
+            return Response({"detail": "Only tenants can create tickets."}, status=status.HTTP_403_FORBIDDEN)
+        tenancy = Tenancy.objects.filter(tenant_user=request.user, is_active=True).select_related("unit").first()
+        if not tenancy:
+            return Response({"detail": "No active tenancy found."}, status=status.HTTP_404_NOT_FOUND)
+        ser = CreateTicketSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ticket = Ticket.objects.create(
+            tenancy=tenancy,
+            unit=tenancy.unit,
+            subject=ser.validated_data["subject"],
+            description=ser.validated_data["description"],
+        )
+        return Response(TicketSerializer(ticket).data, status=status.HTTP_201_CREATED)
+
+
+class TicketListView(AuthenticatedAPIView):
+    """List tickets – landlord sees all their property tickets, tenant sees own."""
+
+    def get(self, request):
+        if request.user.role == User.Role.LANDLORD:
+            tickets = Ticket.objects.filter(
+                tenancy__landlord=request.user
+            ).select_related("tenancy__tenant_user", "unit__building").order_by("-created_at")
+        else:
+            tickets = Ticket.objects.filter(
+                tenancy__tenant_user=request.user
+            ).select_related("tenancy__tenant_user", "unit__building").order_by("-created_at")
+        return Response(TicketSerializer(tickets, many=True).data)
+
+
+class TicketDetailView(AuthenticatedAPIView):
+    """GET/PATCH a single ticket."""
+
+    def _get_ticket(self, request, ticket_id):
+        ticket = Ticket.objects.select_related(
+            "tenancy__tenant_user", "tenancy__landlord", "unit__building"
+        ).filter(id=ticket_id).first()
+        if not ticket:
+            return None, Response({"detail": "Ticket not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id not in (ticket.tenancy.landlord_id, ticket.tenancy.tenant_user_id):
+            return None, Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        return ticket, None
+
+    def get(self, request, ticket_id):
+        ticket, err = self._get_ticket(request, ticket_id)
+        if err:
+            return err
+        return Response(TicketSerializer(ticket).data)
+
+    def patch(self, request, ticket_id):
+        ticket, err = self._get_ticket(request, ticket_id)
+        if err:
+            return err
+        ser = UpdateTicketSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        update_fields = ["updated_at"]
+        for field in ("status", "resolution_provider", "resolution_notes", "receipt_url"):
+            if field in ser.validated_data:
+                setattr(ticket, field, ser.validated_data[field])
+                update_fields.append(field)
+        ticket.save(update_fields=update_fields)
+        return Response(TicketSerializer(ticket).data)
+
+
+# ---------------------------------------------------------------------------
+# Offboarding views
+# ---------------------------------------------------------------------------
+
+class InitiateOffboardingView(AuthenticatedAPIView):
+    """Landlord initiates the offboarding process."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = InitiateOffboardingSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user, is_active=True
+        ).select_related("unit__building", "tenant_user").first()
+        if not tenancy:
+            return Response({"detail": "Active tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        offboarding, created = Offboarding.objects.get_or_create(
+            tenancy=tenancy, defaults={"status": Offboarding.Status.INITIATED}
+        )
+        # Apply deposit deductions if provided
+        deductions = ser.validated_data.get("deductions", 0)
+        deduction_reasons = ser.validated_data.get("deduction_reasons", "")
+        if deductions and hasattr(tenancy, "deposit"):
+            deposit = tenancy.deposit
+            deposit.deductions = deductions
+            deposit.deduction_reasons = deduction_reasons
+            deposit.save(update_fields=["deductions", "deduction_reasons", "updated_at"])
+        return Response(OffboardingSerializer(offboarding).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class OffboardingDetailView(AuthenticatedAPIView):
+    """GET offboarding status for a tenancy."""
+
+    def get(self, request, tenancy_id):
+        tenancy = Tenancy.objects.filter(id=tenancy_id).first()
+        if not tenancy:
+            return Response({"detail": "Tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id not in (tenancy.landlord_id, tenancy.tenant_user_id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            offboarding = tenancy.offboarding
+        except Offboarding.DoesNotExist:
+            return Response({"detail": "Offboarding not initiated."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(OffboardingSerializer(offboarding).data)
+
+
+class SettleDepositView(AuthenticatedAPIView):
+    """Landlord settles deposit (applies deductions and calculates refund)."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = SettleDepositSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user
+        ).first()
+        if not tenancy:
+            return Response({"detail": "Tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            deposit = tenancy.deposit
+        except Deposit.DoesNotExist:
+            return Response({"detail": "No deposit for this tenancy."}, status=status.HTTP_400_BAD_REQUEST)
+
+        deductions = ser.validated_data.get("deductions", 0)
+        deposit.deductions = deductions
+        deposit.deduction_reasons = ser.validated_data.get("deduction_reasons", "")
+        refund = max(deposit.amount - deductions, 0)
+        deposit.refund_amount = refund
+        if refund > 0:
+            deposit.status = Deposit.Status.PARTIALLY_REFUNDED if deductions > 0 else Deposit.Status.REFUNDED
+        else:
+            deposit.status = Deposit.Status.REFUNDED
+        deposit.refunded_on = date.today()
+        deposit.save()
+
+        # If tenant owes extra (deductions > deposit), record that
+        extra_owed = max(deductions - deposit.amount, 0)
+
+        # Advance offboarding status
+        try:
+            offboarding = tenancy.offboarding
+            offboarding.status = Offboarding.Status.DEPOSIT_SETTLED
+            offboarding.save(update_fields=["status", "updated_at"])
+        except Offboarding.DoesNotExist:
+            pass
+
+        return Response({
+            "deposit": DepositSerializer(deposit).data,
+            "extra_owed_by_tenant": str(extra_owed),
+        })
+
+
+class CompleteHandoffView(AuthenticatedAPIView):
+    """Landlord marks handoff as complete, uploads handoff document."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = CompleteHandoffSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user
+        ).select_related("unit").first()
+        if not tenancy:
+            return Response({"detail": "Tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            offboarding = tenancy.offboarding
+        except Offboarding.DoesNotExist:
+            return Response({"detail": "Offboarding not initiated."}, status=status.HTTP_400_BAD_REQUEST)
+
+        offboarding.handoff_document_url = ser.validated_data.get("handoff_document_url", "")
+        offboarding.status = Offboarding.Status.HANDOFF_COMPLETE
+        offboarding.save(update_fields=["handoff_document_url", "status", "updated_at"])
+
+        # End tenancy, mark unit under maintenance
+        tenancy.is_active = False
+        tenancy.end_date = date.today()
+        tenancy.save(update_fields=["is_active", "end_date", "updated_at"])
+        tenancy.unit.status = Unit.UnitStatus.UNDER_MAINTENANCE
+        tenancy.unit.save(update_fields=["status", "updated_at"])
+
+        offboarding.status = Offboarding.Status.UNDER_MAINTENANCE
+        offboarding.save(update_fields=["status", "updated_at"])
+
+        return Response(OffboardingSerializer(offboarding).data)
+
+
+class ConfirmMaintenanceDoneView(AuthenticatedAPIView):
+    """Landlord confirms maintenance is done → unit becomes available."""
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        ser = ConfirmMaintenanceDoneSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenancy = Tenancy.objects.filter(
+            id=ser.validated_data["tenancy_id"], landlord=request.user
+        ).select_related("unit").first()
+        if not tenancy:
+            return Response({"detail": "Tenancy not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            offboarding = tenancy.offboarding
+        except Offboarding.DoesNotExist:
+            return Response({"detail": "Offboarding not initiated."}, status=status.HTTP_400_BAD_REQUEST)
+
+        offboarding.status = Offboarding.Status.COMPLETED
+        offboarding.save(update_fields=["status", "updated_at"])
+        tenancy.unit.status = Unit.UnitStatus.AVAILABLE
+        tenancy.unit.save(update_fields=["status", "updated_at"])
+
+        return Response({
+            "detail": f"Unit {tenancy.unit.label} is now available for rent.",
+            "offboarding": OffboardingSerializer(offboarding).data,
+        })

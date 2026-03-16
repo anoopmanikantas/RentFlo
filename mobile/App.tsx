@@ -62,6 +62,30 @@ import {
   type Plan,
   type AddOnCatalogItem,
   type AnalyticsData,
+  // Onboarding
+  fetchOnboardingStatus,
+  uploadDocument,
+  verifyDocument,
+  createDeposit,
+  payDeposit,
+  createAgreement,
+  signAgreement,
+  type OnboardingStatus,
+  type TenantDocumentItem,
+  type DepositInfo,
+  type AgreementInfo,
+  // Tickets
+  fetchTickets,
+  createTicket,
+  updateTicket,
+  type TicketItem,
+  // Offboarding
+  initiateOffboarding,
+  fetchOffboardingDetail,
+  settleDeposit,
+  completeHandoff,
+  confirmMaintenanceDone,
+  type OffboardingInfo,
 } from "./src/api";
 import { launchRazorpayPayment } from "./src/razorpay";
 
@@ -1312,6 +1336,7 @@ export default function App() {
                   setPaymentForm={setPaymentForm}
                   onSubmit={handleTenantPayment}
                   busy={busy}
+                  token={token}
                 />
               ) : (
                 <TenantWelcome user={user} />
@@ -1343,9 +1368,10 @@ function ThemeToggle() {
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
   const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
-  type ScreenType = "dashboard" | "plans" | "analytics" | "delinquency" | "cashflow" | "roi" | "tenant-risk" | "maintenance" | "tax-report";
+  type ScreenType = "dashboard" | "plans" | "analytics" | "delinquency" | "cashflow" | "roi" | "tenant-risk" | "maintenance" | "tax-report" | "onboarding" | "tickets" | "offboarding";
   const [activeForm, setActiveForm] = useState<FormType>(null);
   const [screen, setScreen] = useState<ScreenType>("dashboard");
+  const [selectedTenancyId, setSelectedTenancyId] = useState<number | null>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
@@ -1416,6 +1442,15 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   if (screen === "tax-report") {
     return <TaxComplianceReportScreen token={token} onBack={() => setScreen("analytics")} />;
   }
+  if (screen === "onboarding" && selectedTenancyId) {
+    return <OnboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => { setScreen("dashboard"); setSelectedTenancyId(null); }} onRefresh={onRefresh} />;
+  }
+  if (screen === "tickets") {
+    return <TicketsScreen token={token} isLandlord={true} onBack={() => setScreen("dashboard")} />;
+  }
+  if (screen === "offboarding" && selectedTenancyId) {
+    return <OffboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => { setScreen("dashboard"); setSelectedTenancyId(null); }} onRefresh={onRefresh} />;
+  }
 
   return (
     <View style={styles.stack}>
@@ -1424,6 +1459,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         <ActionChip icon="📊" label="Dashboard" active={true} onPress={() => {}} />
         <ActionChip icon="💎" label="Plans" active={false} onPress={() => setScreen("plans")} />
         <ActionChip icon="📈" label="Analytics" active={false} onPress={() => setScreen("analytics")} />
+        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => setScreen("tickets")} />
       </View>
 
       {/* Subscription tier badge + usage */}
@@ -1477,7 +1513,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                 style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: t.accent, borderRadius: 4 }}
                 onPress={() => setScreen("plans")}
               >
-                <Text style={{ color: t.background, fontWeight: "700", fontSize: 12 }}>View Plans</Text>
+                <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>View Plans</Text>
               </Pressable>
             )}
           </View>
@@ -1660,17 +1696,31 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
                   <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
                 </View>
                 <StatusBadge status={tenant.status} />
-                <Pressable
-                  style={styles.removeButton}
-                  onPress={async () => {
-                    try {
-                      await endTenancy(token, tenant.id);
-                      onRefresh();
-                    } catch (e) { /* ignore */ }
-                  }}
-                >
-                  <Text style={styles.removeButtonText}>Remove</Text>
-                </Pressable>
+                <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap" }}>
+                  <Pressable
+                    style={[styles.removeButton, { backgroundColor: t.primaryMuted }]}
+                    onPress={() => { setSelectedTenancyId(tenant.id); setScreen("onboarding"); }}
+                  >
+                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Onboard</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.removeButton, { backgroundColor: "rgba(163,95,0,0.10)" }]}
+                    onPress={() => { setSelectedTenancyId(tenant.id); setScreen("offboarding"); }}
+                  >
+                    <Text style={[styles.removeButtonText, { color: "#a35f00" }]}>Offboard</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.removeButton}
+                    onPress={async () => {
+                      try {
+                        await endTenancy(token, tenant.id);
+                        onRefresh();
+                      } catch (e) { /* ignore */ }
+                    }}
+                  >
+                    <Text style={styles.removeButtonText}>Remove</Text>
+                  </Pressable>
+                </View>
               </View>
             ))}
           </View>
@@ -1687,7 +1737,7 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
               onPress={handleExportPayments}
               disabled={exportBusy}
             >
-              <Text style={{ color: t.background, fontWeight: "700", fontSize: 12 }}>
+              <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>
                 {exportBusy ? "Exporting..." : "📥 Export"}
               </Text>
             </Pressable>
@@ -1722,6 +1772,7 @@ function TenantView({
   setPaymentForm,
   onSubmit,
   busy,
+  token,
 }: {
   user: AuthUser;
   data: TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> };
@@ -1729,10 +1780,25 @@ function TenantView({
   setPaymentForm: (value: InitiatePaymentInput) => void;
   onSubmit: () => void;
   busy: boolean;
+  token: string;
 }) {
-  const { s: styles } = useT();
+  const { t, s: styles } = useT();
+  const [tenantScreen, setTenantScreen] = useState<"dashboard" | "onboarding" | "tickets">("dashboard");
+
+  if (tenantScreen === "onboarding") {
+    return <OnboardingScreen token={token} tenancyId={data.tenancy.id} isLandlord={false} onBack={() => setTenantScreen("dashboard")} onRefresh={() => {}} />;
+  }
+  if (tenantScreen === "tickets") {
+    return <TicketsScreen token={token} isLandlord={false} onBack={() => setTenantScreen("dashboard")} />;
+  }
+
   return (
     <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="🏠" label="Dashboard" active={tenantScreen === "dashboard"} onPress={() => setTenantScreen("dashboard")} />
+        <ActionChip icon="📋" label="Onboarding" active={false} onPress={() => setTenantScreen("onboarding")} />
+        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => setTenantScreen("tickets")} />
+      </View>
       <View style={styles.summaryGrid}>
         <SummaryCard label="Your code" value={user.tenant_code || "—"} note="Share with landlord" />
         <SummaryCard label="Unit" value={data.tenancy.unit_label} note={data.tenancy.building_name} />
@@ -2254,6 +2320,7 @@ function Field(props: {
   onChangeText: (value: string) => void;
   secureTextEntry?: boolean;
   keyboardType?: "default" | "numeric";
+  placeholder?: string;
 }) {
   const { t, s: styles } = useT();
   return (
@@ -2266,6 +2333,7 @@ function Field(props: {
         secureTextEntry={props.secureTextEntry}
         keyboardType={props.keyboardType}
         autoCapitalize="none"
+        placeholder={props.placeholder}
         placeholderTextColor={t.textSecondary}
       />
     </View>
@@ -2915,6 +2983,668 @@ function TaxComplianceReportScreen({ token, onBack }: { token: string; onBack: (
           </View>
         </>
       ) : null}
+    </View>
+  );
+}
+
+// ─── Onboarding Screen ──────────────────────────────────────────────────────
+
+function OnboardingScreen({
+  token,
+  tenancyId,
+  isLandlord,
+  onBack,
+  onRefresh,
+}: {
+  token: string;
+  tenancyId: number;
+  isLandlord: boolean;
+  onBack: () => void;
+  onRefresh: () => void;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<OnboardingStatus | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Form state
+  const [docType, setDocType] = useState<string>("aadhar");
+  const [docNumber, setDocNumber] = useState("");
+  const [docFileUrl, setDocFileUrl] = useState("");
+  const [depositAmount, setDepositAmount] = useState("");
+  const [agreementFee, setAgreementFee] = useState("");
+  const [agreementDocUrl, setAgreementDocUrl] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const d = await fetchOnboardingStatus(token, tenancyId);
+      setData(d);
+    } catch (e) {
+      setMsg(readError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [token, tenancyId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const statusSteps = [
+    { key: "pending_documents", label: "Upload Documents" },
+    { key: "pending_deposit", label: "Pay Deposit" },
+    { key: "pending_agreement", label: "Sign Agreement" },
+    { key: "pending_first_rent", label: "Pay First Rent" },
+    { key: "completed", label: "Completed" },
+  ];
+
+  const currentStepIndex = data ? statusSteps.findIndex((s) => s.key === data.onboarding_status) : 0;
+
+  async function handleUploadDoc() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await uploadDocument(token, tenancyId, { doc_type: docType, doc_number: docNumber, file_url: docFileUrl || undefined });
+      setMsg("Document uploaded.");
+      setDocNumber("");
+      setDocFileUrl("");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleVerifyDoc(docId: number) {
+    setBusy(true);
+    try {
+      await verifyDocument(token, tenancyId, docId);
+      setMsg("Document verified.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleCreateDeposit() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await createDeposit(token, { tenancy_id: tenancyId, amount: depositAmount });
+      setMsg("Deposit configured.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handlePayDeposit() {
+    setBusy(true);
+    try {
+      await payDeposit(token, tenancyId);
+      setMsg("Deposit marked as paid.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleCreateAgreement() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await createAgreement(token, { tenancy_id: tenancyId, agreement_fee: agreementFee, document_url: agreementDocUrl || undefined });
+      setMsg("Agreement created.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleSignAgreement() {
+    setBusy(true);
+    try {
+      await signAgreement(token, tenancyId);
+      setMsg("Agreement signed.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
+        <ActionChip icon="📋" label="Onboarding" active={true} onPress={() => {}} />
+      </View>
+      <Text style={styles.panelTitle}>Tenant Onboarding</Text>
+      {data && <Text style={styles.helper}>{data.tenant_name} • {data.building_name} / {data.unit_label}</Text>}
+
+      {loading ? <ActivityIndicator color={t.accent} /> : null}
+      {msg ? <Text style={[styles.helper, { marginTop: 8 }]}>{msg}</Text> : null}
+
+      {data && (
+        <>
+          {/* Progress steps */}
+          <View style={[styles.panel, { marginTop: 16 }]}>
+            <Text style={styles.sectionKicker}>Progress</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+              {statusSteps.map((step, i) => (
+                <View
+                  key={step.key}
+                  style={{
+                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16,
+                    backgroundColor: i < currentStepIndex ? t.success : i === currentStepIndex ? t.primaryMuted : t.border,
+                  }}
+                >
+                  <Text style={{
+                    fontSize: 12, fontWeight: "600",
+                    color: i < currentStepIndex ? t.successText : i === currentStepIndex ? t.primary : t.textSecondary,
+                  }}>
+                    {i < currentStepIndex ? "✓ " : ""}{step.label}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          {/* Step 1: Documents */}
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Step 1</Text>
+            <Text style={styles.panelTitle}>ID & Work Proof</Text>
+            {data.documents.length > 0 && (
+              <View style={styles.tableLike}>
+                {data.documents.map((doc) => (
+                  <View key={doc.id} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{doc.doc_type.replace("_", " ").toUpperCase()}</Text>
+                      <Text style={styles.rowMeta}>{doc.doc_number || "No number"}</Text>
+                    </View>
+                    <StatusBadge status={doc.verified ? "verified" : "pending"} />
+                    {isLandlord && !doc.verified && (
+                      <Pressable style={[styles.removeButton, { backgroundColor: t.success }]} onPress={() => handleVerifyDoc(doc.id)}>
+                        <Text style={[styles.removeButtonText, { color: t.successText }]}>Verify</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
+            <View style={styles.formGrid}>
+              <View>
+                <Text style={styles.fieldLabel}>Document type</Text>
+                <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                  {(["aadhar", "pan", "work_proof", "student_proof"] as const).map((dt) => (
+                    <Pressable
+                      key={dt}
+                      onPress={() => setDocType(dt)}
+                      style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: docType === dt ? t.primary : t.inputBg, borderWidth: 1, borderColor: docType === dt ? t.primary : t.inputBorder }}
+                    >
+                      <Text style={{ color: docType === dt ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{dt.replace("_", " ").toUpperCase()}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+              <Field label="Document number" value={docNumber} onChangeText={setDocNumber} placeholder="e.g. XXXX-XXXX-XXXX" />
+              <Field label="File URL (optional)" value={docFileUrl} onChangeText={setDocFileUrl} placeholder="https://..." />
+            </View>
+            <PrimaryButton label={busy ? "Uploading..." : "Upload Document"} onPress={handleUploadDoc} disabled={busy} fullWidth />
+          </View>
+
+          {/* Step 2: Deposit */}
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Step 2</Text>
+            <Text style={styles.panelTitle}>Security Deposit (Refundable)</Text>
+            {data.deposit ? (
+              <View style={{ marginBottom: 12 }}>
+                <Text style={styles.rowValue}>{money(data.deposit.amount)}</Text>
+                <StatusBadge status={data.deposit.status} />
+                {data.deposit.status === "pending" && (
+                  <PrimaryButton label={busy ? "Processing..." : "Mark Deposit Paid"} onPress={handlePayDeposit} disabled={busy} fullWidth />
+                )}
+              </View>
+            ) : isLandlord ? (
+              <View style={styles.formGrid}>
+                <Field label="Deposit amount" value={depositAmount} onChangeText={setDepositAmount} keyboardType="numeric" placeholder="e.g. 25000" />
+                <PrimaryButton label={busy ? "Saving..." : "Set Deposit"} onPress={handleCreateDeposit} disabled={busy} fullWidth />
+              </View>
+            ) : <Text style={styles.helper}>Waiting for landlord to set deposit amount.</Text>}
+          </View>
+
+          {/* Step 3: Agreement */}
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Step 3</Text>
+            <Text style={styles.panelTitle}>Rental Agreement</Text>
+            <Text style={styles.helper}>Agreement fees to be paid by tenant</Text>
+            {data.agreement ? (
+              <View style={{ marginTop: 8 }}>
+                <Text style={styles.rowMeta}>Fee: {money(data.agreement.agreement_fee)} • {data.agreement.fee_paid ? "Paid" : "Unpaid"}</Text>
+                <StatusBadge status={data.agreement.status.replace("_", " ")} />
+                {data.agreement.document_url ? <Text style={[styles.rowMeta, { marginTop: 4 }]}>Doc: {data.agreement.document_url}</Text> : null}
+                {data.agreement.status === "pending_signature" && (
+                  <PrimaryButton label={busy ? "Signing..." : "Sign Agreement & Pay Fee"} onPress={handleSignAgreement} disabled={busy} fullWidth />
+                )}
+              </View>
+            ) : isLandlord ? (
+              <View style={styles.formGrid}>
+                <Field label="Agreement fee" value={agreementFee} onChangeText={setAgreementFee} keyboardType="numeric" placeholder="e.g. 2000" />
+                <Field label="Document URL (optional)" value={agreementDocUrl} onChangeText={setAgreementDocUrl} placeholder="https://..." />
+                <PrimaryButton label={busy ? "Creating..." : "Create Agreement"} onPress={handleCreateAgreement} disabled={busy} fullWidth />
+              </View>
+            ) : <Text style={styles.helper}>Waiting for landlord to create agreement.</Text>}
+          </View>
+
+          {/* Step 4: First Rent */}
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Step 4</Text>
+            <Text style={styles.panelTitle}>First Month Rent</Text>
+            <Text style={styles.helper}>
+              {data.onboarding_status === "pending_first_rent"
+                ? "Pay your first month's rent via Card / UPI / Cash from the dashboard."
+                : data.onboarding_status === "completed"
+                ? "✓ Onboarding complete! You're all set."
+                : "Complete the previous steps first."}
+            </Text>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+// ─── Tickets Screen ─────────────────────────────────────────────────────────
+
+function TicketsScreen({
+  token,
+  isLandlord,
+  onBack,
+}: {
+  token: string;
+  isLandlord: boolean;
+  onBack: () => void;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [tickets, setTickets] = useState<TicketItem[]>([]);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+
+  // Create form
+  const [subject, setSubject] = useState("");
+  const [description, setDescription] = useState("");
+
+  // Update form (landlord)
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editStatus, setEditStatus] = useState("");
+  const [editProvider, setEditProvider] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+  const [editReceipt, setEditReceipt] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const data = await fetchTickets(token);
+      setTickets(data);
+    } catch (e) { setMsg(readError(e)); } finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function handleCreate() {
+    if (!subject.trim()) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await createTicket(token, { subject, description });
+      setMsg("Ticket created.");
+      setSubject("");
+      setDescription("");
+      setShowCreate(false);
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleUpdate(ticketId: number) {
+    setBusy(true);
+    setMsg("");
+    try {
+      const update: any = {};
+      if (editStatus) update.status = editStatus;
+      if (editProvider) update.resolution_provider = editProvider;
+      if (editNotes) update.resolution_notes = editNotes;
+      if (editReceipt) update.receipt_url = editReceipt;
+      await updateTicket(token, ticketId, update);
+      setMsg("Ticket updated.");
+      setEditingId(null);
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  const statusColors: Record<string, string> = {
+    open: t.warningText,
+    in_progress: t.primary,
+    resolved: t.successText,
+    closed: t.textSecondary,
+  };
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
+        <ActionChip icon="🎫" label="Tickets" active={true} onPress={() => {}} />
+      </View>
+      <Text style={styles.panelTitle}>Support Tickets</Text>
+      {msg ? <Text style={[styles.helper, { marginTop: 4 }]}>{msg}</Text> : null}
+
+      {!isLandlord && (
+        <View style={{ marginTop: 8 }}>
+          {showCreate ? (
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>New Ticket</Text>
+              <View style={styles.formGrid}>
+                <Field label="Subject" value={subject} onChangeText={setSubject} placeholder="e.g. Leaking tap in bathroom" />
+                <Field label="Description" value={description} onChangeText={setDescription} placeholder="Detailed description..." />
+              </View>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                <PrimaryButton label={busy ? "Creating..." : "Submit Ticket"} onPress={handleCreate} disabled={busy} />
+                <Pressable onPress={() => setShowCreate(false)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+              </View>
+            </View>
+          ) : (
+            <PrimaryButton label="+ Raise a Ticket" onPress={() => setShowCreate(true)} fullWidth />
+          )}
+        </View>
+      )}
+
+      {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
+
+      {tickets.length === 0 && !loading ? (
+        <Text style={[styles.helper, { marginTop: 16 }]}>No tickets yet.</Text>
+      ) : (
+        <View style={[styles.tableLike, { marginTop: 16 }]}>
+          {tickets.map((ticket) => (
+            <View key={ticket.id} style={[styles.panel, { marginBottom: 8 }]}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={styles.rowTitle}>#{ticket.id} – {ticket.subject}</Text>
+                <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: (statusColors[ticket.status] || t.textSecondary) + "18" }}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: statusColors[ticket.status] || t.textSecondary }}>
+                    {ticket.status.replace("_", " ").toUpperCase()}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.rowMeta}>{ticket.building_name} / {ticket.unit_label} • {ticket.tenant_name}</Text>
+              <Text style={[styles.helper, { marginTop: 4 }]}>{ticket.description}</Text>
+              {ticket.resolution_provider ? <Text style={styles.rowMeta}>Provider: {ticket.resolution_provider.replace("_", " ")}</Text> : null}
+              {ticket.resolution_notes ? <Text style={styles.rowMeta}>Notes: {ticket.resolution_notes}</Text> : null}
+              {ticket.receipt_url ? <Text style={styles.rowMeta}>Receipt: {ticket.receipt_url}</Text> : null}
+
+              {/* Landlord can update ticket */}
+              {isLandlord && ticket.status !== "closed" && (
+                editingId === ticket.id ? (
+                  <View style={[styles.formGrid, { marginTop: 8 }]}>
+                    <View>
+                      <Text style={styles.fieldLabel}>Status</Text>
+                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                        {(["in_progress", "resolved", "closed"] as const).map((s) => (
+                          <Pressable
+                            key={s}
+                            onPress={() => setEditStatus(s)}
+                            style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editStatus === s ? t.primary : t.inputBg, borderWidth: 1, borderColor: editStatus === s ? t.primary : t.inputBorder }}
+                          >
+                            <Text style={{ color: editStatus === s ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{s.replace("_", " ").toUpperCase()}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                    <View>
+                      <Text style={styles.fieldLabel}>Resolution by</Text>
+                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                        {(["urban_clap", "owner", "tenant"] as const).map((p) => (
+                          <Pressable
+                            key={p}
+                            onPress={() => setEditProvider(p)}
+                            style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editProvider === p ? t.primary : t.inputBg, borderWidth: 1, borderColor: editProvider === p ? t.primary : t.inputBorder }}
+                          >
+                            <Text style={{ color: editProvider === p ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{p === "urban_clap" ? "Urban Clap" : p === "owner" ? "Owner" : "Tenant"}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                    <Field label="Resolution notes" value={editNotes} onChangeText={setEditNotes} placeholder="What was done..." />
+                    <Field label="Receipt URL (optional)" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://..." />
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      <PrimaryButton label={busy ? "Saving..." : "Save"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                      <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <Pressable
+                    style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
+                    onPress={() => { setEditingId(ticket.id); setEditStatus(ticket.status); setEditProvider(ticket.resolution_provider); setEditNotes(ticket.resolution_notes); setEditReceipt(ticket.receipt_url); }}
+                  >
+                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Update Ticket</Text>
+                  </Pressable>
+                )
+              )}
+
+              {/* Tenant can upload receipt */}
+              {!isLandlord && ticket.status !== "closed" && (
+                editingId === ticket.id ? (
+                  <View style={[styles.formGrid, { marginTop: 8 }]}>
+                    <Field label="Receipt URL" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://receipt..." />
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      <PrimaryButton label={busy ? "Saving..." : "Upload Receipt"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                      <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <Pressable
+                    style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
+                    onPress={() => { setEditingId(ticket.id); setEditReceipt(ticket.receipt_url); }}
+                  >
+                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Add Receipt</Text>
+                  </Pressable>
+                )
+              )}
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ─── Offboarding Screen ─────────────────────────────────────────────────────
+
+function OffboardingScreen({
+  token,
+  tenancyId,
+  isLandlord,
+  onBack,
+  onRefresh,
+}: {
+  token: string;
+  tenancyId: number;
+  isLandlord: boolean;
+  onBack: () => void;
+  onRefresh: () => void;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<OffboardingInfo | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notStarted, setNotStarted] = useState(false);
+
+  // Form state
+  const [deductions, setDeductions] = useState("");
+  const [deductionReasons, setDeductionReasons] = useState("");
+  const [handoffDocUrl, setHandoffDocUrl] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const d = await fetchOffboardingDetail(token, tenancyId);
+      setData(d);
+      setNotStarted(false);
+    } catch (e) {
+      if (readError(e).includes("not initiated")) {
+        setNotStarted(true);
+      } else {
+        setMsg(readError(e));
+      }
+    } finally { setLoading(false); }
+  }, [token, tenancyId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function handleInitiate() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await initiateOffboarding(token, { tenancy_id: tenancyId, deductions: deductions || undefined, deduction_reasons: deductionReasons || undefined });
+      setMsg("Offboarding initiated.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleSettleDeposit() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const result = await settleDeposit(token, { tenancy_id: tenancyId, deductions: deductions || undefined, deduction_reasons: deductionReasons || undefined });
+      const extra = Number(result.extra_owed_by_tenant);
+      setMsg(extra > 0 ? `Deposit settled. Tenant owes extra: ${money(extra)}` : "Deposit settled & refund calculated.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleHandoff() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await completeHandoff(token, { tenancy_id: tenancyId, handoff_document_url: handoffDocUrl || undefined });
+      setMsg("Handoff complete. Unit is under maintenance.");
+      await load();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  async function handleMaintenanceDone() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const result = await confirmMaintenanceDone(token, tenancyId);
+      setMsg(result.detail);
+      await load();
+      onRefresh();
+    } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
+  }
+
+  const statusSteps = [
+    { key: "initiated", label: "Initiated" },
+    { key: "deposit_settled", label: "Deposit Settled" },
+    { key: "final_rent_paid", label: "Final Rent Paid" },
+    { key: "handoff_complete", label: "Handoff" },
+    { key: "under_maintenance", label: "Maintenance" },
+    { key: "completed", label: "Unit Available" },
+  ];
+  const currentStep = data ? statusSteps.findIndex((s) => s.key === data.status) : -1;
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.navChips}>
+        <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
+        <ActionChip icon="🚪" label="Offboarding" active={true} onPress={() => {}} />
+      </View>
+      <Text style={styles.panelTitle}>Offboarding</Text>
+      {msg ? <Text style={[styles.helper, { marginTop: 4 }]}>{msg}</Text> : null}
+
+      {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
+
+      {notStarted && isLandlord && (
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Start offboarding</Text>
+          <Text style={styles.helper}>Optionally specify deposit deductions upfront.</Text>
+          <View style={styles.formGrid}>
+            <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
+            <Field label="Deduction reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, cleaning, etc." />
+          </View>
+          <PrimaryButton label={busy ? "Processing..." : "Initiate Offboarding"} onPress={handleInitiate} disabled={busy} fullWidth />
+        </View>
+      )}
+
+      {notStarted && !isLandlord && (
+        <View style={styles.panel}><Text style={styles.helper}>Offboarding has not been initiated by the landlord yet.</Text></View>
+      )}
+
+      {data && (
+        <>
+          {/* Progress */}
+          <View style={[styles.panel, { marginTop: 12 }]}>
+            <Text style={styles.sectionKicker}>Progress</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+              {statusSteps.map((step, i) => (
+                <View
+                  key={step.key}
+                  style={{
+                    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16,
+                    backgroundColor: i < currentStep ? t.success : i === currentStep ? t.primaryMuted : t.border,
+                  }}
+                >
+                  <Text style={{
+                    fontSize: 12, fontWeight: "600",
+                    color: i < currentStep ? t.successText : i === currentStep ? t.primary : t.textSecondary,
+                  }}>
+                    {i < currentStep ? "✓ " : ""}{step.label}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          {/* Deposit summary */}
+          {data.deposit && (
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>Deposit Summary</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 8 }}>
+                <View><Text style={styles.rowMeta}>Original</Text><Text style={styles.rowValue}>{money(data.deposit.amount)}</Text></View>
+                <View><Text style={styles.rowMeta}>Deductions</Text><Text style={styles.rowValue}>{money(data.deposit.deductions)}</Text></View>
+                <View><Text style={styles.rowMeta}>Refund</Text><Text style={styles.rowValue}>{money(data.deposit.refund_amount)}</Text></View>
+              </View>
+              {data.deposit.deduction_reasons ? <Text style={[styles.rowMeta, { marginTop: 8 }]}>Reasons: {data.deposit.deduction_reasons}</Text> : null}
+              <StatusBadge status={data.deposit.status} />
+            </View>
+          )}
+
+          {/* Settle deposit (landlord) */}
+          {isLandlord && data.status === "initiated" && (
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>Settle Deposit</Text>
+              <Text style={styles.helper}>Apply deductions and calculate refund. Deductions greater than deposit means tenant pays extra.</Text>
+              <View style={styles.formGrid}>
+                <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
+                <Field label="Reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, painting, etc." />
+              </View>
+              <PrimaryButton label={busy ? "Settling..." : "Settle Deposit"} onPress={handleSettleDeposit} disabled={busy} fullWidth />
+            </View>
+          )}
+
+          {/* Handoff (landlord) */}
+          {isLandlord && (data.status === "deposit_settled" || data.status === "final_rent_paid") && (
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>Handoff</Text>
+              <Text style={styles.helper}>Upload the handoff letter/document and complete the handoff. Unit will be marked under maintenance.</Text>
+              <View style={styles.formGrid}>
+                <Field label="Handoff document URL" value={handoffDocUrl} onChangeText={setHandoffDocUrl} placeholder="https://..." />
+              </View>
+              <PrimaryButton label={busy ? "Processing..." : "Complete Handoff"} onPress={handleHandoff} disabled={busy} fullWidth />
+            </View>
+          )}
+
+          {/* Maintenance done (landlord) */}
+          {isLandlord && data.status === "under_maintenance" && (
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>Maintenance</Text>
+              <Text style={styles.helper}>Once maintenance is complete, confirm to make the unit available for new tenants.</Text>
+              <Text style={[styles.helper, { fontStyle: "italic" }]}>TODO: Auto-publish to NoBroker.com once available</Text>
+              <PrimaryButton label={busy ? "Processing..." : "Confirm Maintenance Done"} onPress={handleMaintenanceDone} disabled={busy} fullWidth />
+            </View>
+          )}
+
+          {data.status === "completed" && (
+            <View style={styles.panel}>
+              <Text style={[styles.panelTitle, { color: t.successText }]}>✓ Offboarding Complete</Text>
+              <Text style={styles.helper}>The unit is now available for rent.</Text>
+            </View>
+          )}
+        </>
+      )}
     </View>
   );
 }

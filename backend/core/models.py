@@ -120,9 +120,15 @@ class Building(TimestampedModel):
 
 
 class Unit(TimestampedModel):
+    class UnitStatus(models.TextChoices):
+        AVAILABLE = "available", "Available"
+        OCCUPIED = "occupied", "Occupied"
+        UNDER_MAINTENANCE = "under_maintenance", "Under Maintenance"
+
     building = models.ForeignKey(Building, on_delete=models.CASCADE, related_name="units")
     label = models.CharField(max_length=80)
     monthly_rent = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=24, choices=UnitStatus.choices, default=UnitStatus.AVAILABLE)
 
     class Meta:
         unique_together = ("building", "label")
@@ -132,11 +138,24 @@ class Unit(TimestampedModel):
 
 
 class Tenancy(TimestampedModel):
+    class OnboardingStatus(models.TextChoices):
+        PENDING_DOCUMENTS = "pending_documents", "Pending Documents"
+        PENDING_DEPOSIT = "pending_deposit", "Pending Deposit"
+        PENDING_AGREEMENT = "pending_agreement", "Pending Agreement"
+        PENDING_FIRST_RENT = "pending_first_rent", "Pending First Rent"
+        COMPLETED = "completed", "Completed"
+
     landlord = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tenancies")
     tenant_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tenancies_as_tenant")
     unit = models.ForeignKey(Unit, on_delete=models.CASCADE, related_name="tenancies")
     start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    onboarding_status = models.CharField(
+        max_length=24,
+        choices=OnboardingStatus.choices,
+        default=OnboardingStatus.PENDING_DOCUMENTS,
+    )
 
     def __str__(self):
         return f"{self.tenant_user} @ {self.unit}"
@@ -191,6 +210,8 @@ class Payment(TimestampedModel):
         max_length=32,
         choices=[
             ("rent", "Rent"),
+            ("deposit", "Deposit"),
+            ("agreement_fee", "Agreement Fee"),
             ("maintenance", "Maintenance"),
             ("utilities", "Utilities"),
             ("tax", "Tax"),
@@ -217,3 +238,126 @@ class MaintenanceRecord(TimestampedModel):
 
     def __str__(self):
         return f"{self.unit} - {self.amount} on {self.date}"
+
+
+# ---------------------------------------------------------------------------
+# Onboarding – Document collection
+# ---------------------------------------------------------------------------
+
+class TenantDocument(TimestampedModel):
+    class DocType(models.TextChoices):
+        AADHAR = "aadhar", "Aadhar Card"
+        PAN = "pan", "PAN Card"
+        WORK_PROOF = "work_proof", "Work Proof"
+        STUDENT_PROOF = "student_proof", "Student / College Proof"
+
+    tenancy = models.ForeignKey(Tenancy, on_delete=models.CASCADE, related_name="documents")
+    doc_type = models.CharField(max_length=20, choices=DocType.choices)
+    doc_number = models.CharField(max_length=60, blank=True)
+    file_url = models.URLField(max_length=500, blank=True)
+    verified = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("tenancy", "doc_type")
+
+    def __str__(self):
+        return f"{self.tenancy.tenant_user} – {self.get_doc_type_display()}"
+
+
+# ---------------------------------------------------------------------------
+# Onboarding – Deposit tracking
+# ---------------------------------------------------------------------------
+
+class Deposit(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+        PARTIALLY_REFUNDED = "partially_refunded", "Partially Refunded"
+        REFUNDED = "refunded", "Refunded"
+
+    tenancy = models.OneToOneField(Tenancy, on_delete=models.CASCADE, related_name="deposit")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    paid_on = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.PENDING)
+    # Offboarding fields
+    deductions = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    deduction_reasons = models.TextField(blank=True)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    refunded_on = models.DateField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Deposit {self.amount} – {self.get_status_display()} ({self.tenancy})"
+
+
+# ---------------------------------------------------------------------------
+# Onboarding – Rental Agreement
+# ---------------------------------------------------------------------------
+
+class Agreement(TimestampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PENDING_SIGNATURE = "pending_signature", "Pending Signature"
+        SIGNED = "signed", "Signed"
+
+    tenancy = models.OneToOneField(Tenancy, on_delete=models.CASCADE, related_name="agreement")
+    agreement_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    fee_paid = models.BooleanField(default=False)
+    signed_date = models.DateField(null=True, blank=True)
+    document_url = models.URLField(max_length=500, blank=True)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.DRAFT)
+
+    def __str__(self):
+        return f"Agreement – {self.get_status_display()} ({self.tenancy})"
+
+
+# ---------------------------------------------------------------------------
+# Post-Onboarding – Support Tickets
+# ---------------------------------------------------------------------------
+
+class Ticket(TimestampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        IN_PROGRESS = "in_progress", "In Progress"
+        RESOLVED = "resolved", "Resolved"
+        CLOSED = "closed", "Closed"
+
+    class ResolutionProvider(models.TextChoices):
+        URBAN_CLAP = "urban_clap", "Urban Clap"
+        OWNER = "owner", "Owner's Choice"
+        TENANT = "tenant", "Tenant's Choice"
+
+    tenancy = models.ForeignKey(Tenancy, on_delete=models.CASCADE, related_name="tickets")
+    unit = models.ForeignKey(Unit, on_delete=models.CASCADE, related_name="tickets")
+    subject = models.CharField(max_length=200)
+    description = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
+    resolution_provider = models.CharField(
+        max_length=20, choices=ResolutionProvider.choices, blank=True
+    )
+    resolution_notes = models.TextField(blank=True)
+    receipt_url = models.URLField(max_length=500, blank=True)
+
+    def __str__(self):
+        return f"Ticket #{self.pk} – {self.subject}"
+
+
+# ---------------------------------------------------------------------------
+# Offboarding
+# ---------------------------------------------------------------------------
+
+class Offboarding(TimestampedModel):
+    class Status(models.TextChoices):
+        INITIATED = "initiated", "Initiated"
+        DEPOSIT_SETTLED = "deposit_settled", "Deposit Settled"
+        FINAL_RENT_PAID = "final_rent_paid", "Final Rent Paid"
+        HANDOFF_COMPLETE = "handoff_complete", "Handoff Complete"
+        UNDER_MAINTENANCE = "under_maintenance", "Under Maintenance"
+        COMPLETED = "completed", "Completed"
+
+    tenancy = models.OneToOneField(Tenancy, on_delete=models.CASCADE, related_name="offboarding")
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.INITIATED)
+    handoff_document_url = models.URLField(max_length=500, blank=True)
+    notes = models.TextField(blank=True)
+
+    def __str__(self):
+        return f"Offboarding – {self.get_status_display()} ({self.tenancy})"

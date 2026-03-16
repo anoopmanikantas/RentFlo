@@ -405,3 +405,215 @@ export function fetchTaxComplianceReport(token: string) {
     profit_margin: number;
   }>("/landlord/analytics/tax-report/", undefined, token);
 }
+
+// ---------------------------------------------------------------------------
+// Onboarding types & endpoints
+// ---------------------------------------------------------------------------
+
+export type TenantDocumentItem = {
+  id: number;
+  doc_type: "aadhar" | "pan" | "work_proof" | "student_proof";
+  doc_number: string;
+  file_url: string;
+  verified: boolean;
+  created_at: string;
+};
+
+export type DepositInfo = {
+  id: number;
+  amount: string;
+  paid_on: string | null;
+  status: "pending" | "paid" | "partially_refunded" | "refunded";
+  deductions: string;
+  deduction_reasons: string;
+  refund_amount: string;
+  refunded_on: string | null;
+};
+
+export type AgreementInfo = {
+  id: number;
+  agreement_fee: string;
+  fee_paid: boolean;
+  signed_date: string | null;
+  document_url: string;
+  status: "draft" | "pending_signature" | "signed";
+};
+
+export type OnboardingStatus = {
+  tenancy_id: number;
+  tenant_name: string;
+  unit_label: string;
+  building_name: string;
+  onboarding_status: "pending_documents" | "pending_deposit" | "pending_agreement" | "pending_first_rent" | "completed";
+  documents: TenantDocumentItem[];
+  deposit: DepositInfo | null;
+  agreement: AgreementInfo | null;
+};
+
+export function fetchOnboardingStatus(token: string, tenancyId: number) {
+  return request<OnboardingStatus>(`/onboarding/${tenancyId}/`, undefined, token);
+}
+
+export function uploadDocument(
+  token: string,
+  tenancyId: number,
+  data: { doc_type: string; doc_number?: string; file_url?: string },
+) {
+  return request<TenantDocumentItem>(
+    `/onboarding/${tenancyId}/documents/`,
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function verifyDocument(token: string, tenancyId: number, docId: number) {
+  return request<TenantDocumentItem>(
+    `/onboarding/${tenancyId}/documents/${docId}/verify/`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export function createDeposit(token: string, data: { tenancy_id: number; amount: string }) {
+  return request<DepositInfo>(
+    "/onboarding/deposit/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function payDeposit(token: string, tenancyId: number) {
+  return request<DepositInfo>(
+    "/onboarding/deposit/pay/",
+    { method: "POST", body: JSON.stringify({ tenancy_id: tenancyId }) },
+    token,
+  );
+}
+
+export function createAgreement(
+  token: string,
+  data: { tenancy_id: number; agreement_fee: string; document_url?: string },
+) {
+  return request<AgreementInfo>(
+    "/onboarding/agreement/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function signAgreement(token: string, tenancyId: number) {
+  return request<AgreementInfo>(
+    "/onboarding/agreement/sign/",
+    { method: "POST", body: JSON.stringify({ tenancy_id: tenancyId }) },
+    token,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ticket types & endpoints
+// ---------------------------------------------------------------------------
+
+export type TicketItem = {
+  id: number;
+  tenant_name: string;
+  unit_label: string;
+  building_name: string;
+  subject: string;
+  description: string;
+  status: "open" | "in_progress" | "resolved" | "closed";
+  resolution_provider: "" | "urban_clap" | "owner" | "tenant";
+  resolution_notes: string;
+  receipt_url: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export function fetchTickets(token: string) {
+  return request<TicketItem[]>("/tickets/", undefined, token);
+}
+
+export function createTicket(token: string, data: { subject: string; description: string }) {
+  return request<TicketItem>(
+    "/tickets/create/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function fetchTicketDetail(token: string, ticketId: number) {
+  return request<TicketItem>(`/tickets/${ticketId}/`, undefined, token);
+}
+
+export function updateTicket(
+  token: string,
+  ticketId: number,
+  data: Partial<Pick<TicketItem, "status" | "resolution_provider" | "resolution_notes" | "receipt_url">>,
+) {
+  return request<TicketItem>(
+    `/tickets/${ticketId}/`,
+    { method: "PATCH", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Offboarding types & endpoints
+// ---------------------------------------------------------------------------
+
+export type OffboardingInfo = {
+  id: number;
+  tenant_name: string;
+  unit_label: string;
+  building_name: string;
+  status: "initiated" | "deposit_settled" | "final_rent_paid" | "handoff_complete" | "under_maintenance" | "completed";
+  handoff_document_url: string;
+  notes: string;
+  deposit: DepositInfo | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export function initiateOffboarding(
+  token: string,
+  data: { tenancy_id: number; deductions?: string; deduction_reasons?: string },
+) {
+  return request<OffboardingInfo>(
+    "/offboarding/initiate/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function fetchOffboardingDetail(token: string, tenancyId: number) {
+  return request<OffboardingInfo>(`/offboarding/${tenancyId}/`, undefined, token);
+}
+
+export function settleDeposit(
+  token: string,
+  data: { tenancy_id: number; deductions?: string; deduction_reasons?: string },
+) {
+  return request<{ deposit: DepositInfo; extra_owed_by_tenant: string }>(
+    "/offboarding/settle-deposit/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function completeHandoff(
+  token: string,
+  data: { tenancy_id: number; handoff_document_url?: string },
+) {
+  return request<OffboardingInfo>(
+    "/offboarding/handoff/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function confirmMaintenanceDone(token: string, tenancyId: number) {
+  return request<{ detail: string; offboarding: OffboardingInfo }>(
+    "/offboarding/maintenance-done/",
+    { method: "POST", body: JSON.stringify({ tenancy_id: tenancyId }) },
+    token,
+  );
+}
