@@ -4084,14 +4084,14 @@ function PrimaryButton({
 }
 
 function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; label: string; active: boolean; onPress: () => void; disabled?: boolean }) {
-  const { s: styles } = useT();
+  const { t, s: styles } = useT();
   return (
     <Pressable
       style={[styles.actionChip, active && styles.actionChipActive, disabled && styles.disabledButton]}
       onPress={onPress}
       disabled={disabled}
     >
-      <Text style={{ fontSize: 16 }}>{icon}</Text>
+      <Text style={{ fontSize: 16, color: active ? t.accent : t.textSecondary }}>{icon}</Text>
       <Text style={[styles.actionChipText, active && styles.actionChipTextActive]}>{label}</Text>
     </Pressable>
   );
@@ -4192,7 +4192,7 @@ function BottomTabBarView({
             backgroundColor: item.active ? t.primaryMuted : "transparent",
           }}
         >
-          <Text style={{ fontSize: 16 }}>{item.icon}</Text>
+          <Text style={{ fontSize: 16, color: item.active ? t.accent : t.textSecondary }}>{item.icon}</Text>
           <Text
             style={{
               color: item.active ? t.accent : t.textSecondary,
