@@ -247,6 +247,14 @@ type ThemeCtx = {
   toggle: () => void;
 };
 
+type BottomTabItem = {
+  key: string;
+  icon: string;
+  label: string;
+  active: boolean;
+  onPress: () => void;
+};
+
 type AppLocationCoords = {
   latitude: number;
   longitude: number;
@@ -263,6 +271,10 @@ type AppLocationCtx = {
 
 const ThemeContext = createContext<ThemeCtx>(null!);
 const LocationContext = createContext<AppLocationCtx>(null!);
+const BottomTabsContext = createContext<{
+  items: BottomTabItem[] | null;
+  setItems: (items: BottomTabItem[] | null) => void;
+} | null>(null);
 
 function useT() {
   return useContext(ThemeContext);
@@ -491,6 +503,9 @@ function makeStyles(t: Theme, isWideWeb: boolean, isMediumWeb: boolean) {
       backgroundColor: t.bg,
       ...webTransition,
     },
+    appShell: {
+      flex: 1,
+    },
     pageOuter: {
       alignItems: isWideWeb ? "stretch" : "center",
       paddingVertical: isWideWeb ? 32 : 20,
@@ -505,6 +520,9 @@ function makeStyles(t: Theme, isWideWeb: boolean, isMediumWeb: boolean) {
                 : "radial-gradient(circle at top right, rgba(26,35,126,0.10), transparent 30%), linear-gradient(180deg, #f8f9fa 0%, #eef2fb 100%)",
           } as any)
         : {}),
+    },
+    pageOuterWithBottomTabs: {
+      paddingBottom: isWideWeb ? 132 : 116,
     },
     pageInner: {
       width: "100%",
@@ -678,6 +696,19 @@ function makeStyles(t: Theme, isWideWeb: boolean, isMediumWeb: boolean) {
       fontFamily: LABEL_FONT,
       letterSpacing: 0.8,
       textTransform: "uppercase",
+    },
+    fixedBottomTabWrap: {
+      position: Platform.OS === "web" ? ("fixed" as const) : ("absolute" as const),
+      left: 0,
+      right: 0,
+      bottom: isWideWeb ? 18 : 14,
+      paddingHorizontal: isWideWeb ? 30 : 14,
+      zIndex: 300,
+    },
+    fixedBottomTabInner: {
+      width: "100%",
+      maxWidth: Platform.OS === "web" ? (isWideWeb ? 1480 : 980) : 520,
+      alignSelf: "center",
     },
     heroSplit: {
       flexDirection: isWideWeb ? ("row" as const) : ("column" as const),
@@ -1462,6 +1493,7 @@ export default function App() {
   const [locationCoords, setLocationCoords] = useState<AppLocationCoords | null>(null);
   const [locationError, setLocationError] = useState("");
   const [locationBusy, setLocationBusy] = useState(false);
+  const [bottomTabItems, setBottomTabItems] = useState<BottomTabItem[] | null>(null);
   const firebaseLandlordAuthEnabled = isFirebaseLandlordAuthEnabled();
   const [message, setMessage] = useState(
     firebaseLandlordAuthEnabled
@@ -1904,10 +1936,12 @@ export default function App() {
   return (
     <ThemeContext.Provider value={themeCtx}>
       <LocationContext.Provider value={locationCtx}>
-        <SafeAreaView style={styles.safeArea}>
-          <StatusBar style={isDark ? "light" : "dark"} />
-          <ScrollView contentContainerStyle={styles.pageOuter}>
-            <View style={styles.pageInner}>
+        <BottomTabsContext.Provider value={{ items: bottomTabItems, setItems: setBottomTabItems }}>
+          <SafeAreaView style={styles.safeArea}>
+            <StatusBar style={isDark ? "light" : "dark"} />
+            <View style={styles.appShell}>
+              <ScrollView contentContainerStyle={[styles.pageOuter, bottomTabItems ? styles.pageOuterWithBottomTabs : null]}>
+                <View style={styles.pageInner}>
               <AppTopBar user={user} onLogout={user ? logout : undefined} />
 
               {!user ? (
@@ -2193,9 +2227,19 @@ export default function App() {
                   {locationGranted ? <RolePicker onSelect={handleRoleSelect} busy={busy} visible={showRolePicker && !!user} /> : null}
                 </>
               )}
+                </View>
+              </ScrollView>
+
+              {bottomTabItems?.length ? (
+                <View pointerEvents="box-none" style={styles.fixedBottomTabWrap}>
+                  <View style={styles.fixedBottomTabInner}>
+                    <BottomTabBarView items={bottomTabItems} />
+                  </View>
+                </View>
+              ) : null}
             </View>
-          </ScrollView>
-        </SafeAreaView>
+          </SafeAreaView>
+        </BottomTabsContext.Provider>
       </LocationContext.Provider>
     </ThemeContext.Provider>
   );
@@ -2232,16 +2276,14 @@ function AppTopBar({
         </View>
         <View style={styles.topBarLockup}>
           <Text style={styles.topBarTitle}>RentFlo</Text>
-          <Text style={styles.topBarMeta}>
-            {user ? `${user.role === "landlord" ? "Landlord workspace" : "Tenant workspace"}` : "Architectural trust for rent operations"}
-          </Text>
+          <Text style={styles.topBarMeta}>{user ? `${user.role === "landlord" ? "Landlord workspace" : "Tenant workspace"}` : "Architectural trust for rent operations"}</Text>
         </View>
       </View>
       <View style={styles.topBarActions}>
         {user ? (
           <>
             <View style={styles.topBarPill}>
-              <Text style={styles.topBarPillText}>{user.role}</Text>
+              <Text style={styles.topBarPillText}>🔔</Text>
             </View>
             {onLogout ? <PrimaryButton label="Logout" onPress={onLogout} variant="secondary" /> : null}
           </>
@@ -2259,18 +2301,38 @@ function AppTopBar({
 function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; token: string; onRefresh: () => void }) {
   const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
-  type ScreenType = "dashboard" | "plans" | "analytics" | "delinquency" | "cashflow" | "roi" | "tenant-risk" | "maintenance" | "tax-report" | "onboarding" | "tickets" | "offboarding";
+  type ScreenType =
+    | "dashboard"
+    | "properties"
+    | "payments"
+    | "payment-detail"
+    | "payment-history"
+    | "tickets"
+    | "onboarding-status"
+    | "invite-tenant"
+    | "onboarding"
+    | "unit-inspection"
+    | "plans"
+    | "analytics"
+    | "delinquency"
+    | "cashflow"
+    | "roi"
+    | "tenant-risk"
+    | "maintenance"
+    | "tax-report";
   type SummaryDetailType = null | "due" | "outstanding";
   const [activeForm, setActiveForm] = useState<FormType>(null);
   const [screen, setScreen] = useState<ScreenType>("dashboard");
   const [screenVisible, setScreenVisible] = useState(true);
   const [summaryDetail, setSummaryDetail] = useState<SummaryDetailType>(null);
   const [selectedTenancyId, setSelectedTenancyId] = useState<number | null>(null);
+  const [selectedPaymentId, setSelectedPaymentId] = useState<number | null>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
   const [showExportOptions, setShowExportOptions] = useState(false);
   const [exportMessage, setExportMessage] = useState("");
+  const [dashboardTicketCount, setDashboardTicketCount] = useState(0);
   const pendingScreenTransition = useRef<null | (() => void)>(null);
   const summaryDetailForDisplay = useRetainedNullableValue(summaryDetail);
 
@@ -2295,11 +2357,13 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   }
 
   const transitionScreen = useCallback(
-    (nextScreen: ScreenType, options?: { selectedTenancyId?: number | null }) => {
+    (nextScreen: ScreenType, options?: { selectedTenancyId?: number | null; selectedPaymentId?: number | null }) => {
       const nextTenancyId = options?.selectedTenancyId;
+      const nextPaymentId = options?.selectedPaymentId;
       if (
         nextScreen === screen &&
-        (nextTenancyId === undefined || nextTenancyId === selectedTenancyId)
+        (nextTenancyId === undefined || nextTenancyId === selectedTenancyId) &&
+        (nextPaymentId === undefined || nextPaymentId === selectedPaymentId)
       ) {
         return;
       }
@@ -2308,11 +2372,14 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
         if (nextTenancyId !== undefined) {
           setSelectedTenancyId(nextTenancyId);
         }
+        if (nextPaymentId !== undefined) {
+          setSelectedPaymentId(nextPaymentId);
+        }
         setScreen(nextScreen);
       };
       setScreenVisible(false);
     },
-    [screen, selectedTenancyId],
+    [screen, selectedPaymentId, selectedTenancyId],
   );
 
   useEffect(() => {
@@ -2331,6 +2398,24 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
       clearTimeout(timeoutId);
     };
   }, [screenVisible]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTickets(token)
+      .then((items) => {
+        if (!cancelled) {
+          setDashboardTicketCount(items.filter((item) => item.status !== "resolved" && item.status !== "closed").length);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDashboardTicketCount(0);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   async function handleExportPayments(format: PaymentReportFormat) {
     setExportBusy(true);
@@ -2427,7 +2512,120 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   const collectionRate = Number(data.summary.monthly_due || 0) > 0
     ? Math.round((Number(data.summary.monthly_collected || 0) / Number(data.summary.monthly_due || 0)) * 100)
     : 0;
+  const selectedPayment = data.payments.find((payment) => payment.id === selectedPaymentId) || data.payments[0] || null;
+  const lateTenantsCount = data.tenants.filter((tenant) => Number(tenant.balance || 0) > 0).length;
+  const recentLandlordActivity = useMemo(() => {
+    const paymentItems = data.payments.slice(0, 3).map((payment) => ({
+      key: `payment-${payment.id}`,
+      title: payment.tenant_name,
+      note: `${payment.unit_label} • ${payment.paid_on ? formatDisplayDate(payment.paid_on) : "Awaiting confirmation"}`,
+      amount: money(payment.amount),
+      status: payment.status === "succeeded" || payment.status === "paid"
+        ? "paid"
+        : payment.status === "pending"
+          ? "pending"
+          : "late",
+      accent: payment.status === "succeeded" || payment.status === "paid"
+        ? t.successText
+        : payment.status === "pending"
+          ? t.warningText
+          : t.dangerText,
+    }));
+    const lateTenant = data.tenants.find((tenant) => Number(tenant.balance || 0) > 0);
+    if (lateTenant) {
+      paymentItems.push({
+        key: `late-${lateTenant.id}`,
+        title: lateTenant.tenant_name,
+        note: `${lateTenant.unit_label} • Balance outstanding`,
+        amount: money(lateTenant.balance),
+        status: "late",
+        accent: t.dangerText,
+      });
+    }
+    return paymentItems.slice(0, 4);
+  }, [data.payments, data.tenants, t.dangerText, t.successText, t.warningText]);
 
+  if (screen === "properties") {
+    return (
+      <LandlordPropertiesScreen
+        data={data}
+        token={token}
+        onBack={() => transitionScreen("dashboard")}
+        onOpenDashboard={() => transitionScreen("dashboard")}
+        onOpenPayments={() => transitionScreen("payments")}
+        onOpenTickets={() => transitionScreen("tickets")}
+        onOpenInvite={() => transitionScreen("invite-tenant")}
+        onOpenOnboardingStatus={() => transitionScreen("onboarding-status")}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "payments") {
+    return (
+      <LandlordPaymentsScreen
+        data={data}
+        onBack={() => transitionScreen("dashboard")}
+        onOpenDashboard={() => transitionScreen("dashboard")}
+        onOpenProperties={() => transitionScreen("properties")}
+        onOpenTickets={() => transitionScreen("tickets")}
+        onOpenDetail={(paymentId) => transitionScreen("payment-detail", { selectedPaymentId: paymentId })}
+        onOpenHistory={() => transitionScreen("payment-history")}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "payment-detail" && selectedPayment) {
+    return (
+      <LandlordVerifyPaymentScreen
+        payment={selectedPayment}
+        onBack={() => transitionScreen("payments")}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "payment-history") {
+    return (
+      <LandlordTransactionHistoryScreen
+        data={data}
+        onBack={() => transitionScreen("payments")}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "onboarding-status") {
+    return (
+      <LandlordOnboardingStatusScreen
+        data={data}
+        token={token}
+        onBack={() => transitionScreen("properties")}
+        onOpenTenancy={(tenancyId) => transitionScreen("onboarding", { selectedTenancyId: tenancyId })}
+        onInvite={() => transitionScreen("invite-tenant")}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "invite-tenant") {
+    return (
+      <LandlordInviteTenantScreen
+        data={data}
+        token={token}
+        onBack={() => transitionScreen("properties")}
+        onRefresh={onRefresh}
+        visible={screenVisible}
+      />
+    );
+  }
+  if (screen === "unit-inspection" && selectedTenancyId) {
+    return (
+      <LandlordUnitInspectionScreen
+        token={token}
+        tenancyId={selectedTenancyId}
+        onBack={() => transitionScreen("dashboard", { selectedTenancyId: null })}
+        onRefresh={onRefresh}
+        visible={screenVisible}
+      />
+    );
+  }
   if (screen === "plans") {
     return <PlansScreen token={token} onBack={() => transitionScreen("dashboard")} onRefresh={onRefresh} visible={screenVisible} />;
   }
@@ -2456,22 +2654,25 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
     return <OnboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => transitionScreen("dashboard", { selectedTenancyId: null })} onRefresh={onRefresh} visible={screenVisible} />;
   }
   if (screen === "tickets") {
-    return <TicketsScreen token={token} isLandlord={true} onBack={() => transitionScreen("dashboard")} visible={screenVisible} />;
-  }
-  if (screen === "offboarding" && selectedTenancyId) {
-    return <OffboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => transitionScreen("dashboard", { selectedTenancyId: null })} onRefresh={onRefresh} visible={screenVisible} />;
+    return (
+      <TicketsScreen
+        token={token}
+        isLandlord={true}
+        onBack={() => transitionScreen("dashboard")}
+        visible={screenVisible}
+        bottomTabs={[
+          { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: () => transitionScreen("dashboard") },
+          { key: "properties", icon: "🏢", label: "Properties", active: false, onPress: () => transitionScreen("properties") },
+          { key: "payments", icon: "₹", label: "Payments", active: false, onPress: () => transitionScreen("payments") },
+          { key: "tickets", icon: "🎫", label: "Tickets", active: true, onPress: () => {} },
+        ]}
+      />
+    );
   }
 
   return (
     <AppearOnMount visible={screenVisible}>
       <View style={styles.stack}>
-        <View style={styles.navChips}>
-          <ActionChip icon="⌂" label="Home" active={true} onPress={() => {}} />
-          <ActionChip icon="₹" label="Revenue" active={false} onPress={() => transitionScreen("analytics")} />
-          <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => transitionScreen("tickets")} />
-          <ActionChip icon="◈" label="Plans" active={false} onPress={() => transitionScreen("plans")} />
-        </View>
-
         <LinearGradient
           colors={[t.heroStart, t.heroEnd]}
           start={{ x: 0, y: 0 }}
@@ -2479,49 +2680,45 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           style={styles.gradientHero}
         >
           <View style={styles.gradientHeroInner}>
-            <Text style={styles.gradientHeroEyebrow}>Landlord Workspace</Text>
-            <Text style={styles.gradientHeroTitle}>Portfolio overview</Text>
-            <Text style={styles.gradientHeroText}>
-              Managing {data.summary.building_count} buildings across {data.summary.unit_count} units with {occupancyRate}% occupancy and a {collectionRate}% collection rate for {data.current_month}.
-            </Text>
-            <View style={styles.heroSplit}>
-              <View style={[styles.spotlightCard, { backgroundColor: t.mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.18)" }]}>
-                <Text style={[styles.spotlightTitle, { color: t.onHero, opacity: 0.74 }]}>Collected This Cycle</Text>
-                <Text style={[styles.spotlightValue, { color: t.onHero }]}>{money(data.summary.monthly_collected)}</Text>
-                <Text style={[styles.spotlightNote, { color: t.onHero, opacity: 0.8 }]}>
-                  Outstanding {money(data.summary.monthly_outstanding)} across the active rent roll.
-                </Text>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.gradientHeroEyebrow}>Total Rent Collected</Text>
+                <Text style={styles.gradientHeroTitle}>{money(data.summary.monthly_collected)}</Text>
               </View>
-              <View style={[styles.spotlightCard, { backgroundColor: t.mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.18)" }]}>
-                <Text style={[styles.spotlightTitle, { color: t.onHero, opacity: 0.74 }]}>Occupancy</Text>
-                <Text style={[styles.spotlightValue, { color: t.onHero }]}>{occupancyRate}%</Text>
-                <Text style={[styles.spotlightNote, { color: t.onHero, opacity: 0.8 }]}>
-                  {data.summary.tenant_count} occupied units, {Math.max(data.summary.unit_count - data.summary.tenant_count, 0)} still open.
-                </Text>
+              <View style={[styles.badge, { backgroundColor: t.mode === "dark" ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.16)", paddingHorizontal: 14, paddingVertical: 12, borderRadius: 18 }]}>
+                <Text style={[styles.badgeText, { color: t.onHero, fontSize: 18 }]}>₹</Text>
               </View>
+            </View>
+            <View style={{ marginTop: 14, flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View style={{ backgroundColor: "#a0f399", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 }}>
+                <Text style={{ color: "#217128", fontSize: 10, fontFamily: LABEL_FONT, letterSpacing: 0.8, textTransform: "uppercase" }}>Growth</Text>
+              </View>
+              <Text style={[styles.gradientHeroText, { flex: 1 }]}>
+                Occupancy is {occupancyRate}% and collection rate is {collectionRate}% for {data.current_month}.
+              </Text>
             </View>
           </View>
         </LinearGradient>
 
-        <View style={styles.summaryGrid}>
-          <SummaryCard label="Buildings" value={String(data.summary.building_count)} note={`${data.summary.unit_count} units total`} />
-          <SummaryCard label="Tenants" value={String(data.summary.tenant_count)} note="Active occupancies" />
-          <SummaryCard
-            label="Due"
-            value={money(data.summary.monthly_due)}
-            note={`For ${data.current_month}`}
-            actionText="Open rent roll"
-            active={summaryDetail === "due"}
-            onPress={() => setSummaryDetail((current) => (current === "due" ? null : "due"))}
-          />
-          <SummaryCard
-            label="Outstanding"
-            value={money(data.summary.monthly_outstanding)}
-            note={`${money(data.summary.monthly_collected)} collected`}
-            actionText="Open due details"
-            active={summaryDetail === "outstanding"}
+        <View style={[styles.summaryGrid, { alignItems: "stretch" }]}>
+          <Pressable
             onPress={() => setSummaryDetail((current) => (current === "outstanding" ? null : "outstanding"))}
-          />
+            style={[styles.summaryCard, styles.summaryCardInteractive, { minWidth: 180 }, summaryDetail === "outstanding" && styles.summaryCardActive]}
+          >
+            <Text style={{ fontSize: 20, marginBottom: 10, color: t.warningText }}>◌</Text>
+            <Text style={styles.summaryLabel}>Pending</Text>
+            <Text style={[styles.summaryValue, { fontSize: 24 }]}>{money(data.summary.monthly_outstanding)}</Text>
+            <Text style={styles.summaryNote}>Tap for due details</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setSummaryDetail((current) => (current === "outstanding" ? null : "outstanding"))}
+            style={[styles.summaryCard, styles.summaryCardInteractive, { minWidth: 180 }, summaryDetail === "outstanding" && styles.summaryCardActive]}
+          >
+            <Text style={{ fontSize: 20, marginBottom: 10, color: t.dangerText }}>!</Text>
+            <Text style={styles.summaryLabel}>Late Tenants</Text>
+            <Text style={[styles.summaryValue, { fontSize: 24 }]}>{String(lateTenantsCount)}</Text>
+            <Text style={styles.summaryNote}>Residents with unpaid balance</Text>
+          </Pressable>
         </View>
 
         <AppearOnMount visible={Boolean(summaryDetail)} unmountOnExit>
@@ -2585,405 +2782,320 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
           ) : null}
         </AppearOnMount>
 
-        <View style={styles.dashboardGrid}>
-          <View style={styles.dashboardMainColumn}>
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Portfolio</Text>
-              <Text style={styles.panelTitle}>Active properties</Text>
-              <Text style={styles.helper}>
-                Each building card shows occupancy, potential monthly revenue, and any unresolved dues.
-              </Text>
-
-              {buildingSnapshots.length === 0 ? (
-                <Text style={styles.helper}>Add your first building from the operations deck to start the landlord flow.</Text>
-              ) : (
-                <View style={styles.tableLike}>
-                  {buildingSnapshots.map((building) => (
-                    <View key={building.id} style={[styles.tableRow, { alignItems: "stretch" }]}>
-                      <View style={[styles.tableMain, { gap: 8 }]}>
-                        <Text style={styles.rowTitle}>{building.name}</Text>
-                        <Text style={styles.rowMeta}>{building.address}</Text>
-                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                          <View style={styles.badge}>
-                            <Text style={styles.badgeText}>{building.occupiedCount}/{building.unitCount || 0} occupied</Text>
-                          </View>
-                          {building.vacantCount > 0 ? (
-                            <View style={[styles.badge, styles.warnBadge]}>
-                              <Text style={styles.badgeText}>{building.vacantCount} vacant</Text>
-                            </View>
-                          ) : (
-                            <View style={[styles.badge, styles.goodBadge]}>
-                              <Text style={styles.badgeText}>Fully occupied</Text>
-                            </View>
-                          )}
-                        </View>
-                      </View>
-                      <View style={styles.tableNumbers}>
-                        <Text style={styles.rowValue}>{money(building.totalRent)}</Text>
-                        <Text style={styles.rowMeta}>Potential monthly revenue</Text>
-                        <Text style={[styles.rowMeta, { color: building.outstanding > 0 ? t.warningText : t.textSecondary }]}>
-                          {building.outstanding > 0 ? `${money(building.outstanding)} outstanding` : "No outstanding dues"}
-                        </Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
-
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Collections</Text>
-              <Text style={styles.panelTitle}>Tenant payment status</Text>
-              {data.tenants.length === 0 ? (
-                <Text style={styles.helper}>No tenants yet. Add a building, a unit, and assign a tenant from the operations deck.</Text>
-              ) : (
-                <View style={styles.tableLike}>
-                  {data.tenants.map((tenant) => (
-                    <View key={tenant.id} style={styles.tableRow}>
-                      <View style={styles.tableMain}>
-                        <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
-                        <Text style={styles.rowMeta}>
-                          {tenant.building_name} / {tenant.unit_label} • {tenant.tenant_code}
-                        </Text>
-                      </View>
-                      <View style={styles.tableNumbers}>
-                        <Text style={styles.rowValue}>{money(tenant.paid_this_month)}</Text>
-                        <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
-                      </View>
-                      <StatusBadge status={tenant.status} />
-                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
-                        <Pressable
-                          style={[styles.removeButton, { backgroundColor: t.primaryMuted }]}
-                          onPress={() => transitionScreen("onboarding", { selectedTenancyId: tenant.id })}
-                        >
-                          <Text style={[styles.removeButtonText, { color: t.accent }]}>Onboard</Text>
-                        </Pressable>
-                        <Pressable
-                          style={[styles.removeButton, { backgroundColor: t.warning }]}
-                          onPress={() => transitionScreen("offboarding", { selectedTenancyId: tenant.id })}
-                        >
-                          <Text style={[styles.removeButtonText, { color: t.warningText }]}>Offboard</Text>
-                        </Pressable>
-                        <Pressable
-                          style={styles.removeButton}
-                          onPress={async () => {
-                            try {
-                              await endTenancy(token, tenant.id);
-                              onRefresh();
-                            } catch {}
-                          }}
-                        >
-                          <Text style={styles.removeButtonText}>Remove</Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
+            <Text style={styles.panelTitle}>Key Metrics</Text>
+            <Pressable onPress={() => transitionScreen("tickets")}>
+              <Text style={[styles.rowMeta, { color: t.textSecondary }]}>⌁</Text>
+            </Pressable>
           </View>
-
-          <View style={styles.dashboardSideColumn}>
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Operations Deck</Text>
-              <Text style={styles.panelTitle}>Add and assign</Text>
-              {formMsg ? (
-                <View style={[styles.banner, { marginBottom: 4, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
-                  <Text style={[styles.bannerText, { flex: 1 }]}>{formMsg}</Text>
-                  {isUpgradePrompt ? (
-                    <Pressable
-                      style={[styles.selectChip, { backgroundColor: t.primaryMuted }]}
-                      onPress={() => transitionScreen("plans")}
-                    >
-                      <Text style={[styles.selectChipText, { color: t.accent }]}>View Plans</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              ) : null}
-
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
-                <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
-                <ActionChip icon="🏦" label="Bank" active={activeForm === "bank"} onPress={() => openForm("bank")} />
-                <ActionChip icon="👤" label="Assign" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} />
-              </View>
-
-              <AppearOnMount visible={activeForm === "building"} unmountOnExit>
-                {activeForm === "building" ? (
-                  <View style={styles.inlineForm}>
-                    <Text style={styles.inlineFormTitle}>New building</Text>
-                    <Field label="Name" value={bName} onChangeText={setBName} />
-                    <AddressSearch value={bAddress} onSelect={setBAddress} />
-                    <PrimaryButton
-                      label={formBusy ? "Creating..." : "Create building"}
-                      disabled={formBusy || !bName.trim()}
-                      onPress={async () => {
-                        setFormBusy(true);
-                        try {
-                          await createBuilding(token, { name: bName, address: bAddress });
-                          setFormMsg(`✓ Building "${bName}" created`);
-                          setBName("");
-                          setBAddress("");
-                          setActiveForm(null);
-                          onRefresh();
-                        } catch (e) {
-                          setFormMsg(readError(e));
-                        }
-                        setFormBusy(false);
-                      }}
-                    />
-                  </View>
-                ) : null}
-              </AppearOnMount>
-
-              <AppearOnMount visible={activeForm === "unit"} unmountOnExit>
-                {activeForm === "unit" ? (
-                  <View style={styles.inlineForm}>
-                    <Text style={styles.inlineFormTitle}>New unit</Text>
-                    <Text style={styles.fieldLabel}>Select building</Text>
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                      {data.buildings.map((b) => (
-                        <Pressable
-                          key={b.id}
-                          style={[styles.selectChip, selectedBuildingId === b.id && styles.selectChipActive]}
-                          onPress={() => setSelectedBuildingId(b.id)}
-                        >
-                          <Text style={[styles.selectChipText, selectedBuildingId === b.id && styles.selectChipTextActive]}>
-                            {b.name}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                    <Field label="Unit label" value={uLabel} onChangeText={setULabel} placeholder="e.g. 2B or Penthouse A" />
-                    <Field label="Monthly rent (₹)" value={uRent} onChangeText={setURent} keyboardType="numeric" />
-                    <PrimaryButton
-                      label={formBusy ? "Creating..." : "Create unit"}
-                      disabled={formBusy || !selectedBuildingId || !uLabel.trim() || !uRent.trim()}
-                      onPress={async () => {
-                        setFormBusy(true);
-                        try {
-                          await createUnit(token, { building_id: selectedBuildingId!, label: uLabel, monthly_rent: uRent });
-                          setFormMsg(`✓ Unit "${uLabel}" created`);
-                          setSelectedBuildingId(null);
-                          setULabel("");
-                          setURent("");
-                          setActiveForm(null);
-                          onRefresh();
-                        } catch (e) {
-                          setFormMsg(readError(e));
-                        }
-                        setFormBusy(false);
-                      }}
-                    />
-                  </View>
-                ) : null}
-              </AppearOnMount>
-
-              <AppearOnMount visible={activeForm === "bank"} unmountOnExit>
-                {activeForm === "bank" ? (
-                  <View style={styles.inlineForm}>
-                    <Text style={styles.inlineFormTitle}>New bank account</Text>
-                    <Field label="Bank name" value={bankName} onChangeText={setBankName} />
-                    <Field label="Account holder name" value={accName} onChangeText={setAccName} />
-                    <Field label="Account number" value={accNumber} onChangeText={setAccNumber} keyboardType="numeric" />
-                    <Field label="IFSC code" value={ifsc} onChangeText={setIfsc} />
-                    <PrimaryButton
-                      label={formBusy ? "Creating..." : "Add bank account"}
-                      disabled={formBusy || !bankName.trim() || !accNumber.trim()}
-                      onPress={async () => {
-                        setFormBusy(true);
-                        try {
-                          await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
-                          setFormMsg("✓ Bank account added");
-                          setBankName("");
-                          setAccName("");
-                          setAccNumber("");
-                          setIfsc("");
-                          setActiveForm(null);
-                          onRefresh();
-                        } catch (e) {
-                          setFormMsg(readError(e));
-                        }
-                        setFormBusy(false);
-                      }}
-                    />
-                  </View>
-                ) : null}
-              </AppearOnMount>
-
-              <AppearOnMount visible={activeForm === "tenancy"} unmountOnExit>
-                {activeForm === "tenancy" ? (
-                  <View style={styles.inlineForm}>
-                    <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
-                    <Text style={styles.helper}>Enter the tenant code (for example `RF-A3K9`) or the tenant email.</Text>
-                    <Field label="Tenant code or email" value={tenantIdentifier} onChangeText={setTenantIdentifier} />
-                    <Text style={styles.fieldLabel}>Select vacant unit</Text>
-                    <View style={{ gap: 6 }}>
-                      {unoccupiedUnits.length === 0 ? (
-                        <View style={{ gap: 10 }}>
-                          <Text style={styles.helper}>All units are currently occupied.</Text>
-                          <PrimaryButton
-                            label="Create a unit first"
-                            variant="secondary"
-                            onPress={() => {
-                              setActiveForm("unit");
-                              setFormMsg("");
-                            }}
-                          />
-                        </View>
-                      ) : (
-                        unoccupiedUnits.map((u) => (
-                          <Pressable
-                            key={u.id}
-                            style={[styles.selectChip, selectedUnitId === u.id && styles.selectChipActive, { paddingVertical: 10 }]}
-                            onPress={() => setSelectedUnitId(u.id)}
-                          >
-                            <Text style={[styles.selectChipText, selectedUnitId === u.id && styles.selectChipTextActive]}>
-                              {u.building_name} / {u.label} — {money(u.monthly_rent)}/mo
-                            </Text>
-                          </Pressable>
-                        ))
-                      )}
-                    </View>
-                    {unoccupiedUnits.length > 0 ? (
-                      <PrimaryButton
-                        label={formBusy ? "Assigning..." : "Assign tenant"}
-                        disabled={formBusy || !tenantIdentifier.trim() || !selectedUnitId}
-                        onPress={async () => {
-                          setFormBusy(true);
-                          try {
-                            await createTenancy(token, { tenant_identifier: tenantIdentifier, unit_id: selectedUnitId! });
-                            setFormMsg("✓ Tenant assigned successfully");
-                            setTenantIdentifier("");
-                            setSelectedUnitId(null);
-                            setActiveForm(null);
-                            onRefresh();
-                          } catch (e) {
-                            setFormMsg(readError(e));
-                          }
-                          setFormBusy(false);
-                        }}
-                      />
-                    ) : null}
-                  </View>
-                ) : null}
-              </AppearOnMount>
+          <Pressable
+            onPress={() => transitionScreen("tickets")}
+            style={[styles.tableRow, { marginTop: 12, backgroundColor: t.surfaceLowest, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 16 }]}
+          >
+            <View style={[styles.badge, { backgroundColor: t.primaryMuted, width: 44, height: 44, borderRadius: 14, justifyContent: "center" }]}>
+              <Text style={[styles.badgeText, { color: t.accent, fontSize: 18 }]}>🎫</Text>
             </View>
+            <View style={styles.tableMain}>
+              <Text style={styles.rowTitle}>Open Tickets</Text>
+              <Text style={styles.rowMeta}>Maintenance & Queries</Text>
+            </View>
+            <Text style={[styles.rowValue, { color: t.accent }]}>{String(dashboardTicketCount)}</Text>
+          </Pressable>
+        </View>
 
-            {sub ? (
-              <View style={[styles.panel, { gap: 12 }]}>
-                <Text style={styles.sectionKicker}>Subscription</Text>
-                <Text style={styles.panelTitle}>Plan capacity</Text>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                  <View style={styles.tierBadge}>
-                    <Text style={styles.tierBadgeText}>{sub.tier} plan</Text>
-                  </View>
-                  {sub.tier === "free" ? (
-                    <Pressable onPress={() => transitionScreen("plans")}>
-                      <Text style={[styles.rowMeta, { color: t.accent }]}>Upgrade</Text>
-                    </Pressable>
-                  ) : null}
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
+            <Text style={styles.panelTitle}>Recent Activity</Text>
+            <Pressable onPress={() => transitionScreen("payments")}>
+              <Text style={[styles.summaryActionText, { marginTop: 0 }]}>View All</Text>
+            </Pressable>
+          </View>
+          <View style={[styles.tableLike, { marginTop: 12 }]}>
+            {recentLandlordActivity.map((item) => (
+              <Pressable
+                key={item.key}
+                onPress={() => transitionScreen(item.status === "late" ? "payments" : "payment-history")}
+                style={[styles.tableRow, { backgroundColor: t.surfaceLowest, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 14 }]}
+              >
+                <View style={[styles.badge, { width: 46, height: 46, borderRadius: 23, backgroundColor: `${item.accent}22`, justifyContent: "center" }]}>
+                  <Text style={[styles.badgeText, { color: item.accent, fontSize: 16 }]}>{item.title.slice(0, 1).toUpperCase()}</Text>
                 </View>
-                <View style={{ gap: 6 }}>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                    <Text style={styles.rowMeta}>Units</Text>
-                    <Text style={styles.rowValue}>{sub.units_used}/{sub.max_units >= 9999 ? "∞" : sub.max_units}</Text>
-                  </View>
-                  <View style={styles.usageBar}>
-                    <View style={[styles.usageBarFill, { width: `${Math.min((sub.units_used / (sub.max_units >= 9999 ? 100 : sub.max_units)) * 100, 100)}%` }]} />
-                  </View>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
-                    <Text style={styles.rowMeta}>Tenants</Text>
-                    <Text style={styles.rowValue}>{sub.tenants_used}/{sub.max_tenants >= 9999 ? "∞" : sub.max_tenants}</Text>
-                  </View>
-                  <View style={styles.usageBar}>
-                    <View style={[styles.usageBarFill, { width: `${Math.min((sub.tenants_used / (sub.max_tenants >= 9999 ? 100 : sub.max_tenants)) * 100, 100)}%` }]} />
-                  </View>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{item.title}</Text>
+                  <Text style={styles.rowMeta}>{item.note}</Text>
                 </View>
-              </View>
-            ) : null}
-
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Ledger</Text>
-              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                <Text style={styles.panelTitle}>Recent payments</Text>
-                {sub?.has_reports ? (
-                  <Pressable
-                    style={[styles.selectChip, { backgroundColor: t.primaryMuted }]}
-                    onPress={() => {
-                      setShowExportOptions((current) => !current);
-                      setExportMessage("");
-                    }}
-                    disabled={exportBusy}
+                <View style={{ alignItems: "flex-end", gap: 6 }}>
+                  <Text style={[styles.rowValue, { color: item.accent }]}>{item.amount}</Text>
+                  <View
+                    style={[
+                      styles.badge,
+                      item.status === "paid" ? styles.goodBadge : item.status === "pending" ? styles.neutralBadge : styles.warnBadge,
+                    ]}
                   >
-                    <Text style={[styles.selectChipText, { color: t.accent }]}>
-                      {exportBusy ? "Exporting..." : showExportOptions ? "Close" : "Export"}
-                    </Text>
-                  </Pressable>
-                ) : null}
-              </View>
-
-              {exportMessage ? (
-                <Text
-                  style={[
-                    styles.helper,
-                    {
-                      color: exportMessage.startsWith("Downloaded") ? t.successText : t.dangerText,
-                    },
-                  ]}
-                >
-                  {exportMessage}
-                </Text>
-              ) : null}
-
-              <AppearOnMount visible={showExportOptions} unmountOnExit>
-                {showExportOptions ? (
-                  <View style={styles.banner}>
-                    <Text style={styles.bannerText}>Choose the export format for your payment report.</Text>
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                      <ActionChip
-                        icon="📊"
-                        label={exportBusy ? "Exporting..." : "Excel (.xlsx)"}
-                        active={false}
-                        onPress={() => handleExportPayments("excel")}
-                        disabled={exportBusy}
-                      />
-                      <ActionChip
-                        icon="📄"
-                        label={exportBusy ? "Exporting..." : "PDF"}
-                        active={false}
-                        onPress={() => handleExportPayments("pdf")}
-                        disabled={exportBusy}
-                      />
-                    </View>
+                    <Text style={styles.badgeText}>{item.status}</Text>
                   </View>
-                ) : null}
-              </AppearOnMount>
-
-              <View style={styles.tableLike}>
-                {data.payments.length === 0 ? (
-                  <Text style={styles.helper}>No payment records yet.</Text>
-                ) : (
-                  data.payments.map((payment) => (
-                    <View key={payment.id} style={styles.tableRow}>
-                      <View style={styles.tableMain}>
-                        <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
-                        <Text style={styles.rowMeta}>
-                          {payment.building_name} / {payment.unit_label} • {payment.rent_month}
-                        </Text>
-                      </View>
-                      <View style={styles.tableNumbers}>
-                        <Text style={styles.rowValue}>{money(payment.amount)}</Text>
-                        <Text style={styles.rowMeta}>{payment.bank_name}</Text>
-                      </View>
-                      <StatusBadge status={payment.status} />
-                    </View>
-                  ))
-                )}
+                </View>
+              </Pressable>
+            ))}
+            <Pressable
+              onPress={() => transitionScreen("tickets")}
+              style={[styles.tableRow, { backgroundColor: t.cardAlt, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 14 }]}
+            >
+              <View style={[styles.badge, { width: 46, height: 46, borderRadius: 14, backgroundColor: t.primary, justifyContent: "center" }]}>
+                <Text style={[styles.badgeText, { color: t.primaryText, fontSize: 18 }]}>🛠</Text>
               </View>
-            </View>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowTitle}>Maintenance workspace</Text>
+                <Text style={styles.rowMeta}>{dashboardTicketCount > 0 ? `${dashboardTicketCount} active requests to review` : "No unresolved tickets right now"}</Text>
+              </View>
+            </Pressable>
           </View>
         </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Portfolio Actions</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <ActionChip icon="🏢" label="Properties" active={false} onPress={() => transitionScreen("properties")} />
+            <ActionChip icon="₹" label="Payments" active={false} onPress={() => transitionScreen("payments")} />
+            <ActionChip icon="👤" label="Invite Tenant" active={false} onPress={() => transitionScreen("invite-tenant")} />
+            <ActionChip icon="🧾" label="Onboarding" active={false} onPress={() => transitionScreen("onboarding-status")} />
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Workspace Tools</Text>
+          <Text style={styles.helper}>Keep setup, exports, and account actions available without taking over the main dashboard flow.</Text>
+
+          {formMsg ? (
+            <View style={[styles.banner, { marginTop: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
+              <Text style={[styles.bannerText, { flex: 1 }]}>{formMsg}</Text>
+              {isUpgradePrompt ? (
+                <Pressable
+                  style={[styles.selectChip, { backgroundColor: t.primaryMuted }]}
+                  onPress={() => transitionScreen("plans")}
+                >
+                  <Text style={[styles.selectChipText, { color: t.accent }]}>View Plans</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+            <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
+            <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
+            <ActionChip icon="🏦" label="Bank" active={activeForm === "bank"} onPress={() => openForm("bank")} />
+            <ActionChip icon="👤" label="Assign" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} />
+            <ActionChip icon="◈" label="Plans" active={false} onPress={() => transitionScreen("plans")} />
+            <ActionChip icon="📈" label="Analytics" active={false} onPress={() => transitionScreen("analytics")} />
+          </View>
+
+          <AppearOnMount visible={activeForm === "building"} unmountOnExit>
+            {activeForm === "building" ? (
+              <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>Add building</Text>
+                <Field label="Name" value={bName} onChangeText={setBName} />
+                <AddressSearch value={bAddress} onSelect={setBAddress} />
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Create Building"}
+                  disabled={formBusy || !bName.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createBuilding(token, { name: bName, address: bAddress });
+                      setFormMsg(`✓ Building "${bName}" created`);
+                      setBName("");
+                      setBAddress("");
+                      setActiveForm(null);
+                      onRefresh();
+                    } catch (e) {
+                      setFormMsg(readError(e));
+                    }
+                    setFormBusy(false);
+                  }}
+                  fullWidth
+                />
+              </View>
+            ) : null}
+          </AppearOnMount>
+
+          <AppearOnMount visible={activeForm === "unit"} unmountOnExit>
+            {activeForm === "unit" ? (
+              <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>Add unit</Text>
+                <Text style={styles.fieldLabel}>Select building</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {data.buildings.map((building) => (
+                    <Pressable
+                      key={building.id}
+                      style={[styles.selectChip, selectedBuildingId === building.id && styles.selectChipActive]}
+                      onPress={() => setSelectedBuildingId(building.id)}
+                    >
+                      <Text style={[styles.selectChipText, selectedBuildingId === building.id && styles.selectChipTextActive]}>
+                        {building.name}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <View style={[styles.formGrid, { marginTop: 10 }]}>
+                  <Field label="Unit label" value={uLabel} onChangeText={setULabel} placeholder="e.g. 2B or Penthouse A" />
+                  <Field label="Monthly rent (₹)" value={uRent} onChangeText={setURent} keyboardType="numeric" />
+                </View>
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Create Unit"}
+                  disabled={formBusy || !selectedBuildingId || !uLabel.trim() || !uRent.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createUnit(token, { building_id: selectedBuildingId!, label: uLabel, monthly_rent: uRent });
+                      setFormMsg(`✓ Unit "${uLabel}" created`);
+                      setSelectedBuildingId(null);
+                      setULabel("");
+                      setURent("");
+                      setActiveForm(null);
+                      onRefresh();
+                    } catch (e) {
+                      setFormMsg(readError(e));
+                    }
+                    setFormBusy(false);
+                  }}
+                  fullWidth
+                />
+              </View>
+            ) : null}
+          </AppearOnMount>
+
+          <AppearOnMount visible={activeForm === "bank"} unmountOnExit>
+            {activeForm === "bank" ? (
+              <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>Add bank account</Text>
+                <View style={styles.formGrid}>
+                  <Field label="Bank name" value={bankName} onChangeText={setBankName} />
+                  <Field label="Account holder name" value={accName} onChangeText={setAccName} />
+                  <Field label="Account number" value={accNumber} onChangeText={setAccNumber} keyboardType="numeric" />
+                  <Field label="IFSC code" value={ifsc} onChangeText={setIfsc} />
+                </View>
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Add Bank Account"}
+                  disabled={formBusy || !bankName.trim() || !accNumber.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
+                      setFormMsg("✓ Bank account added");
+                      setBankName("");
+                      setAccName("");
+                      setAccNumber("");
+                      setIfsc("");
+                      setActiveForm(null);
+                      onRefresh();
+                    } catch (e) {
+                      setFormMsg(readError(e));
+                    }
+                    setFormBusy(false);
+                  }}
+                  fullWidth
+                />
+              </View>
+            ) : null}
+          </AppearOnMount>
+
+          <AppearOnMount visible={activeForm === "tenancy"} unmountOnExit>
+            {activeForm === "tenancy" ? (
+              <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>Assign tenant to vacant unit</Text>
+                <Text style={styles.helper}>Enter the tenant code or tenant email, then choose a vacant unit.</Text>
+                <Field label="Tenant code or email" value={tenantIdentifier} onChangeText={setTenantIdentifier} />
+                <Text style={styles.fieldLabel}>Vacant units</Text>
+                <View style={{ gap: 8 }}>
+                  {unoccupiedUnits.length === 0 ? (
+                    <Text style={styles.helper}>All units are currently occupied.</Text>
+                  ) : (
+                    unoccupiedUnits.map((unit) => (
+                      <Pressable
+                        key={unit.id}
+                        style={[styles.selectChip, selectedUnitId === unit.id && styles.selectChipActive, { paddingVertical: 10 }]}
+                        onPress={() => setSelectedUnitId(unit.id)}
+                      >
+                        <Text style={[styles.selectChipText, selectedUnitId === unit.id && styles.selectChipTextActive]}>
+                          {unit.building_name} / {unit.label} — {money(unit.monthly_rent)}/mo
+                        </Text>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+                {unoccupiedUnits.length > 0 ? (
+                  <PrimaryButton
+                    label={formBusy ? "Assigning..." : "Assign Tenant"}
+                    disabled={formBusy || !tenantIdentifier.trim() || !selectedUnitId}
+                    onPress={async () => {
+                      setFormBusy(true);
+                      try {
+                        await createTenancy(token, { tenant_identifier: tenantIdentifier, unit_id: selectedUnitId! });
+                        setFormMsg("✓ Tenant assigned successfully");
+                        setTenantIdentifier("");
+                        setSelectedUnitId(null);
+                        setActiveForm(null);
+                        onRefresh();
+                      } catch (e) {
+                        setFormMsg(readError(e));
+                      }
+                      setFormBusy(false);
+                    }}
+                    fullWidth
+                  />
+                ) : null}
+              </View>
+            ) : null}
+          </AppearOnMount>
+
+          {sub?.has_reports ? (
+            <View style={[styles.banner, { marginTop: 16 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.bannerText}>Export your payment report in the format you need.</Text>
+              </View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                <ActionChip
+                  icon="📊"
+                  label={exportBusy ? "Exporting..." : "Excel"}
+                  active={false}
+                  onPress={() => handleExportPayments("excel")}
+                  disabled={exportBusy}
+                />
+                <ActionChip
+                  icon="📄"
+                  label={exportBusy ? "Exporting..." : "PDF"}
+                  active={false}
+                  onPress={() => handleExportPayments("pdf")}
+                  disabled={exportBusy}
+                />
+              </View>
+            </View>
+          ) : null}
+
+          {exportMessage ? (
+            <Text
+              style={[
+                styles.helper,
+                {
+                  marginTop: 8,
+                  color: exportMessage.startsWith("Downloaded") ? t.successText : t.dangerText,
+                },
+              ]}
+            >
+              {exportMessage}
+            </Text>
+          ) : null}
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: true, onPress: () => {} },
+            { key: "properties", icon: "🏢", label: "Properties", active: false, onPress: () => transitionScreen("properties") },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: () => transitionScreen("payments") },
+            { key: "tickets", icon: "🎫", label: "Tickets", active: false, onPress: () => transitionScreen("tickets") },
+          ]}
+        />
       </View>
     </AppearOnMount>
   );
@@ -3007,11 +3119,11 @@ function TenantView({
   token: string;
 }) {
   const { t, s: styles } = useT();
-  const [tenantScreen, setTenantScreen] = useState<"dashboard" | "onboarding" | "tickets">("dashboard");
+  const [tenantScreen, setTenantScreen] = useState<"dashboard" | "payments" | "maintenance" | "management">("dashboard");
   const [tenantScreenVisible, setTenantScreenVisible] = useState(true);
   const pendingTenantScreenTransition = useRef<null | (() => void)>(null);
 
-  const transitionTenantScreen = useCallback((nextScreen: "dashboard" | "onboarding" | "tickets") => {
+  const transitionTenantScreen = useCallback((nextScreen: "dashboard" | "payments" | "maintenance" | "management") => {
     if (nextScreen === tenantScreen) {
       return;
     }
@@ -3044,34 +3156,69 @@ function TenantView({
   const recentActivity = [
     ...data.payments.slice(0, 3).map((payment) => ({
       key: `payment-${payment.id}`,
-      title: `${money(payment.amount)} ${payment.status === "succeeded" ? "received" : payment.status.replaceAll("_", " ")}`,
-      note: `${payment.bank_name} • ${payment.rent_month}`,
-      meta: payment.paid_on || "Awaiting confirmation",
-      accent: payment.status === "succeeded" ? t.successText : payment.status === "pending" ? t.warningText : t.textSecondary,
+      title: payment.status === "succeeded" || payment.status === "paid" ? "Rent Payment Recorded" : "Payment Update",
+      note: `${money(payment.amount)} • ${payment.rent_month}`,
+      meta: payment.paid_on ? formatDisplayDate(payment.paid_on) : "Awaiting confirmation",
+      accent: payment.status === "succeeded" || payment.status === "paid" ? t.successText : payment.status === "pending" ? t.warningText : t.textSecondary,
     })),
     {
       key: "move-in",
-      title: "Tenancy activated",
+      title: "Tenancy Activated",
       note: `${data.tenancy.building_name} / ${data.tenancy.unit_label}`,
-      meta: data.tenancy.start_date,
+      meta: formatDisplayDate(data.tenancy.start_date),
       accent: t.accent,
     },
   ].slice(0, 4);
+  const totalLifetimePaid = data.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
 
-  if (tenantScreen === "onboarding") {
-    return <OnboardingScreen token={token} tenancyId={data.tenancy.id} isLandlord={false} onBack={() => transitionTenantScreen("dashboard")} onRefresh={() => {}} visible={tenantScreenVisible} />;
+  if (tenantScreen === "payments") {
+    return (
+      <TenantPaymentsReferenceScreen
+        data={data}
+        paymentForm={paymentForm}
+        setPaymentForm={setPaymentForm}
+        onSubmit={onSubmit}
+        busy={busy}
+        onBack={() => transitionTenantScreen("dashboard")}
+        onOpenMaintenance={() => transitionTenantScreen("maintenance")}
+        onOpenManagement={() => transitionTenantScreen("management")}
+        visible={tenantScreenVisible}
+      />
+    );
   }
-  if (tenantScreen === "tickets") {
-    return <TicketsScreen token={token} isLandlord={false} onBack={() => transitionTenantScreen("dashboard")} visible={tenantScreenVisible} />;
+  if (tenantScreen === "maintenance") {
+    return (
+      <TicketsScreen
+        token={token}
+        isLandlord={false}
+        onBack={() => transitionTenantScreen("dashboard")}
+        visible={tenantScreenVisible}
+        bottomTabs={[
+          { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: () => transitionTenantScreen("dashboard") },
+          { key: "payments", icon: "₹", label: "Payments", active: false, onPress: () => transitionTenantScreen("payments") },
+          { key: "maintenance", icon: "🛠", label: "Maintenance", active: true, onPress: () => {} },
+          { key: "management", icon: "📄", label: "Management", active: false, onPress: () => transitionTenantScreen("management") },
+        ]}
+      />
+    );
+  }
+  if (tenantScreen === "management") {
+    return (
+      <TenantLeaseManagementScreen
+        token={token}
+        tenancyId={data.tenancy.id}
+        onBack={() => transitionTenantScreen("dashboard")}
+        visible={tenantScreenVisible}
+      />
+    );
   }
 
   return (
     <AppearOnMount visible={tenantScreenVisible}>
       <View style={styles.stack}>
-        <View style={styles.navChips}>
-          <ActionChip icon="⌂" label="Home" active={tenantScreen === "dashboard"} onPress={() => {}} />
-          <ActionChip icon="📋" label="Onboarding" active={false} onPress={() => transitionTenantScreen("onboarding")} />
-          <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => transitionTenantScreen("tickets")} />
+        <View style={{ gap: 6 }}>
+          <Text style={styles.helper}>Welcome back, {user.first_name || user.username}</Text>
+          <Text style={[styles.panelTitle, { color: t.accent }]}>Your Tenancy</Text>
         </View>
 
         <LinearGradient
@@ -3081,139 +3228,103 @@ function TenantView({
           style={styles.gradientHero}
         >
           <View style={styles.gradientHeroInner}>
-            <Text style={styles.gradientHeroEyebrow}>{outstandingAmount > 0 ? "Payment Pending" : "Account in Good Standing"}</Text>
-            <Text style={styles.gradientHeroTitle}>{outstandingAmount > 0 ? money(outstandingAmount) : money(monthlyRentAmount)}</Text>
-            <Text style={styles.gradientHeroText}>
-              {data.tenancy.building_name} / {data.tenancy.unit_label} • {outstandingAmount > 0 ? "Current balance due" : "Current month rent is already covered"} for {data.current_month}.
-            </Text>
-            <View style={styles.heroSplit}>
-              <PrimaryButton label={busy ? "Processing..." : "Pay now"} onPress={onSubmit} disabled={busy} />
-              <View style={[styles.spotlightCard, { backgroundColor: t.mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.18)", flex: 0.9 }]}>
-                <Text style={[styles.spotlightTitle, { color: t.onHero, opacity: 0.74 }]}>Collection Progress</Text>
-                <Text style={[styles.spotlightValue, { color: t.onHero }]}>{paidPercent}%</Text>
-                <Text style={[styles.spotlightNote, { color: t.onHero, opacity: 0.8 }]}>
-                  {money(totalPaidAmount)} paid against {money(monthlyRentAmount)} this cycle.
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+              <View style={{ flex: 1 }}>
+                <View style={[styles.badge, { alignSelf: "flex-start", backgroundColor: outstandingAmount > 0 ? "#ff635b" : "#a0f399", marginBottom: 12 }]}>
+                  <Text style={[styles.badgeText, { color: outstandingAmount > 0 ? "#ffffff" : "#217128" }]}>{outstandingAmount > 0 ? "Pending" : "Paid"}</Text>
+                </View>
+                <Text style={[styles.panelTitle, { color: t.onHero }]}>{outstandingAmount > 0 ? "Current Rent Due" : "Rent Cleared"}</Text>
+                <Text style={[styles.gradientHeroText, { marginTop: 8 }]}>
+                  {data.tenancy.building_name}, {data.tenancy.unit_label} • {outstandingAmount > 0 ? `For ${data.current_month}` : `Paid for ${data.current_month}`}
                 </Text>
               </View>
+              <Text style={[styles.gradientHeroTitle, { fontSize: 34 }]}>{money(outstandingAmount || monthlyRentAmount)}</Text>
+            </View>
+            <View style={{ marginTop: 18 }}>
+              <PrimaryButton label={busy ? "Processing..." : "Pay Now →"} onPress={onSubmit} disabled={busy} fullWidth />
             </View>
           </View>
         </LinearGradient>
 
         <View style={styles.summaryGrid}>
-          <SummaryCard label="Your code" value={user.tenant_code || "—"} note="Share with landlord" />
-          <SummaryCard label="Unit" value={data.tenancy.unit_label} note={data.tenancy.building_name} />
-          <SummaryCard label="Paid" value={money(data.current_month_paid)} note="This month" />
-          <SummaryCard label="Balance" value={money(data.current_month_balance)} note="Remaining" />
-        </View>
-
-        <View style={styles.dashboardGrid}>
-          <View style={styles.dashboardMainColumn}>
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Quick Actions</Text>
-              <Text style={styles.panelTitle}>Tenancy shortcuts</Text>
-              <View style={styles.summaryGrid}>
-                <Pressable
-                  style={[styles.summaryCard, { minWidth: 220 }]}
-                  onPress={() => transitionTenantScreen("tickets")}
-                >
-                  <Text style={styles.summaryLabel}>Support</Text>
-                  <Text style={styles.summaryValue}>Raise Ticket</Text>
-                  <Text style={styles.summaryNote}>Report maintenance or ask for help</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.summaryCard, { minWidth: 220 }]}
-                  onPress={() => transitionTenantScreen("onboarding")}
-                >
-                  <Text style={styles.summaryLabel}>Documents</Text>
-                  <Text style={styles.summaryValue}>Onboarding</Text>
-                  <Text style={styles.summaryNote}>Track verification, deposit, and agreement steps</Text>
-                </Pressable>
-                <View style={[styles.summaryCard, { minWidth: 220 }]}>
-                  <Text style={styles.summaryLabel}>History</Text>
-                  <Text style={styles.summaryValue}>{data.payments.length}</Text>
-                  <Text style={styles.summaryNote}>Recorded payment entries</Text>
-                </View>
+          <Pressable
+            style={[styles.panel, { flexBasis: "100%", flexGrow: 1, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }]}
+            onPress={() => transitionTenantScreen("maintenance")}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 16, flex: 1 }}>
+              <View style={[styles.badge, { width: 48, height: 48, borderRadius: 14, backgroundColor: t.warning, justifyContent: "center" }]}>
+                <Text style={[styles.badgeText, { color: t.warningText, fontSize: 18 }]}>🛠</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowTitle}>Raise Maintenance Ticket</Text>
+                <Text style={styles.rowMeta}>Tap to report an issue</Text>
               </View>
             </View>
+            <Text style={[styles.rowMeta, { fontSize: 18 }]}>›</Text>
+          </Pressable>
 
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Recent Activity</Text>
-              <Text style={styles.panelTitle}>Your tenancy timeline</Text>
-              <View style={styles.tableLike}>
-                {recentActivity.map((item) => (
-                  <View key={item.key} style={styles.tableRow}>
-                    <View style={[styles.badge, { backgroundColor: `${item.accent}20` }]}>
-                      <Text style={[styles.badgeText, { color: item.accent }]}>Live</Text>
-                    </View>
-                    <View style={styles.tableMain}>
-                      <Text style={styles.rowTitle}>{item.title}</Text>
-                      <Text style={styles.rowMeta}>{item.note}</Text>
-                    </View>
-                    <View style={styles.tableNumbers}>
-                      <Text style={styles.rowMeta}>{item.meta}</Text>
-                    </View>
+          <Pressable style={[styles.summaryCard, { minWidth: 180 }]} onPress={() => transitionTenantScreen("payments")}>
+            <View style={[styles.badge, { width: 40, height: 40, borderRadius: 12, backgroundColor: t.primaryMuted, justifyContent: "center", marginBottom: 14 }]}>
+              <Text style={[styles.badgeText, { color: t.accent, fontSize: 16 }]}>🕘</Text>
+            </View>
+            <Text style={styles.rowTitle}>View Payment History</Text>
+          </Pressable>
+
+          <Pressable style={[styles.summaryCard, { minWidth: 180 }]} onPress={() => transitionTenantScreen("management")}>
+            <View style={[styles.badge, { width: 40, height: 40, borderRadius: 12, backgroundColor: t.success, justifyContent: "center", marginBottom: 14 }]}>
+              <Text style={[styles.badgeText, { color: t.successText, fontSize: 16 }]}>📄</Text>
+            </View>
+            <Text style={styles.rowTitle}>Lease Management</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Recent Activity</Text>
+          <View style={{ gap: 18, marginTop: 10 }}>
+            {recentActivity.map((item, index) => (
+              <View key={item.key} style={{ flexDirection: "row", gap: 14 }}>
+                <View style={{ alignItems: "center" }}>
+                  <View style={[styles.badge, { width: 34, height: 34, borderRadius: 17, backgroundColor: `${item.accent}22`, justifyContent: "center" }]}>
+                    <Text style={[styles.badgeText, { color: item.accent }]}>{index === 0 ? "✓" : index === 1 ? "•" : "○"}</Text>
                   </View>
-                ))}
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.dashboardSideColumn}>
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Razorpay</Text>
-              <Text style={styles.panelTitle}>Pay rent inside the app</Text>
-              <View style={styles.formGrid}>
-                <Field
-                  label="Rent month"
-                  value={paymentForm.rent_month}
-                  onChangeText={(rent_month) => setPaymentForm({ ...paymentForm, rent_month })}
-                />
-                <Field
-                  label="Amount"
-                  value={String(paymentForm.amount)}
-                  onChangeText={(amount) => setPaymentForm({ ...paymentForm, amount })}
-                  keyboardType="numeric"
-                />
-                <Field
-                  label="Bank account id"
-                  value={String(paymentForm.bank_account_id)}
-                  onChangeText={(bank_account_id) => setPaymentForm({ ...paymentForm, bank_account_id: Number(bank_account_id) || 0 })}
-                  keyboardType="numeric"
-                />
-              </View>
-              <Text style={styles.helper}>
-                Available accounts: {data.bank_accounts.map((account) => `${account.id}: ${account.bank_name}`).join(" • ")}
-              </Text>
-              <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} fullWidth />
-            </View>
-
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Financial Ledger</Text>
-              <Text style={styles.panelTitle}>Payments recorded</Text>
-              {data.payments.length === 0 ? (
-                <Text style={styles.helper}>No payments yet.</Text>
-              ) : (
-                <View style={styles.tableLike}>
-                  {data.payments.map((payment) => (
-                    <View key={payment.id} style={styles.tableRow}>
-                      <View style={styles.tableMain}>
-                        <Text style={styles.rowTitle}>{payment.rent_month}</Text>
-                        <Text style={styles.rowMeta}>
-                          {payment.bank_name} ({payment.account_number})
-                        </Text>
-                      </View>
-                      <View style={styles.tableNumbers}>
-                        <Text style={styles.rowValue}>{money(payment.amount)}</Text>
-                        <Text style={styles.rowMeta}>{payment.paid_on}</Text>
-                      </View>
-                      <StatusBadge status={payment.status} />
-                    </View>
-                  ))}
+                  {index < recentActivity.length - 1 ? <View style={{ width: 2, flex: 1, minHeight: 28, backgroundColor: t.border, marginTop: 6 }} /> : null}
                 </View>
-              )}
-            </View>
+                <View style={{ flex: 1, paddingBottom: index < recentActivity.length - 1 ? 8 : 0 }}>
+                  <Text style={styles.rowTitle}>{item.title}</Text>
+                  <Text style={styles.rowMeta}>{item.note}</Text>
+                  <Text style={[styles.rowMeta, { marginTop: 2 }]}>{item.meta}</Text>
+                </View>
+              </View>
+            ))}
           </View>
         </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={styles.panelTitle}>Financial Summary</Text>
+            <Text style={[styles.summaryActionText, { marginTop: 0, color: t.successText }]}>Live</Text>
+          </View>
+          <View style={[styles.tableRow, { marginTop: 14, backgroundColor: t.cardAlt, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 16 }]}>
+            <View style={styles.tableMain}>
+              <Text style={styles.summaryLabel}>Total Paid</Text>
+              <Text style={[styles.summaryValue, { fontSize: 24 }]}>{money(totalLifetimePaid)}</Text>
+            </View>
+            <View style={{ alignItems: "flex-end" }}>
+              <Text style={styles.summaryLabel}>Outstanding</Text>
+              <Text style={[styles.summaryValue, { fontSize: 24, color: outstandingAmount > 0 ? t.dangerText : t.successText }]}>{money(outstandingAmount)}</Text>
+            </View>
+          </View>
+          <Text style={styles.helper}>Your tenant code is {user.tenant_code || "not available"} and this cycle is {paidPercent}% paid.</Text>
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: true, onPress: () => {} },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: () => transitionTenantScreen("payments") },
+            { key: "maintenance", icon: "🛠", label: "Maintenance", active: false, onPress: () => transitionTenantScreen("maintenance") },
+            { key: "management", icon: "📄", label: "Management", active: false, onPress: () => transitionTenantScreen("management") },
+          ]}
+        />
       </View>
     </AppearOnMount>
   );
@@ -3986,6 +4097,1234 @@ function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; 
   );
 }
 
+function ScreenTitleBlock({
+  title,
+  subtitle,
+  onBack,
+}: {
+  title: string;
+  subtitle?: string;
+  onBack?: () => void;
+}) {
+  const { t, s: styles } = useT();
+  return (
+    <View style={{ gap: 10 }}>
+      {onBack ? (
+        <Pressable
+          onPress={onBack}
+          style={{
+            alignSelf: "flex-start",
+            paddingVertical: 8,
+            paddingHorizontal: 12,
+            borderRadius: 999,
+            backgroundColor: t.cardAlt,
+          }}
+        >
+          <Text style={[styles.rowMeta, { color: t.accent }]}>← Back</Text>
+        </Pressable>
+      ) : null}
+      <View style={{ gap: 4 }}>
+        <Text style={[styles.panelTitle, { color: t.accent }]}>{title}</Text>
+        {subtitle ? <Text style={styles.helper}>{subtitle}</Text> : null}
+      </View>
+    </View>
+  );
+}
+
+function BottomTabBar({
+  items,
+}: {
+  items: BottomTabItem[];
+}) {
+  const bottomTabs = useContext(BottomTabsContext);
+
+  useEffect(() => {
+    bottomTabs?.setItems(items);
+    return () => {
+      bottomTabs?.setItems(null);
+    };
+  }, [bottomTabs, items]);
+
+  return null;
+}
+
+function BottomTabBarView({
+  items,
+}: {
+  items: BottomTabItem[];
+}) {
+  const { t } = useT();
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        justifyContent: "space-around",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
+        borderRadius: 24,
+        backgroundColor: t.surfaceLowest,
+        shadowColor: t.shadow,
+        shadowOffset: { width: 0, height: 14 },
+        shadowOpacity: t.mode === "dark" ? 0.4 : 0.12,
+        shadowRadius: 24,
+        elevation: 10,
+        ...(Platform.OS === "web"
+          ? ({
+              backdropFilter: "blur(18px)",
+              WebkitBackdropFilter: "blur(18px)",
+            } as any)
+          : {}),
+      }}
+    >
+      {items.map((item) => (
+        <Pressable
+          key={item.key}
+          onPress={item.onPress}
+          style={{
+            flex: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            paddingVertical: 10,
+            borderRadius: 16,
+            backgroundColor: item.active ? t.primaryMuted : "transparent",
+          }}
+        >
+          <Text style={{ fontSize: 16 }}>{item.icon}</Text>
+          <Text
+            style={{
+              color: item.active ? t.accent : t.textSecondary,
+              fontSize: 11,
+              fontFamily: BODY_FONT_SEMIBOLD,
+              textTransform: "uppercase",
+              letterSpacing: 0.8,
+            }}
+          >
+            {item.label}
+          </Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+function LandlordPropertiesScreen({
+  data,
+  onBack,
+  onOpenDashboard,
+  onOpenPayments,
+  onOpenTickets,
+  onOpenInvite,
+  onOpenOnboardingStatus,
+  visible = true,
+}: {
+  data: LandlordDashboard;
+  token: string;
+  onBack: () => void;
+  onOpenDashboard: () => void;
+  onOpenPayments: () => void;
+  onOpenTickets: () => void;
+  onOpenInvite: () => void;
+  onOpenOnboardingStatus: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const properties = useMemo(() => {
+    return data.buildings.map((building) => {
+      const units = data.units.filter((unit) => unit.building === building.id);
+      const occupied = data.tenants.filter((tenant) => tenant.building_name === building.name).length;
+      const vacant = Math.max(units.length - occupied, 0);
+      return {
+        ...building,
+        unitCount: units.length,
+        occupied,
+        vacant,
+        service: 0,
+      };
+    });
+  }, [data.buildings, data.tenants, data.units]);
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock
+          title="Properties"
+          subtitle="Search your portfolio, review occupancy, and jump into rent collection or onboarding."
+          onBack={onBack}
+        />
+
+        <View style={styles.panel}>
+          <TextInput
+            style={styles.input}
+            value=""
+            editable={false}
+            placeholder="Search properties..."
+            placeholderTextColor={t.textSecondary}
+          />
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <View style={[styles.selectChip, styles.selectChipActive]}>
+              <Text style={[styles.selectChipText, styles.selectChipTextActive]}>All Units</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Occupied</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Vacant</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Maintenance</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.tableLike}>
+          {properties.map((property) => (
+            <View key={property.id} style={styles.panel}>
+              <Text style={styles.panelTitle}>{property.name}</Text>
+              <Text style={styles.helper}>{property.address}</Text>
+              <View style={styles.summaryGrid}>
+                <View style={[styles.summaryCard, { minWidth: 110 }]}>
+                  <Text style={styles.summaryLabel}>Occupied</Text>
+                  <Text style={styles.summaryValue}>{String(property.occupied)}</Text>
+                </View>
+                <View style={[styles.summaryCard, { minWidth: 110 }]}>
+                  <Text style={styles.summaryLabel}>Vacant</Text>
+                  <Text style={styles.summaryValue}>{String(property.vacant)}</Text>
+                </View>
+                <View style={[styles.summaryCard, { minWidth: 110 }]}>
+                  <Text style={styles.summaryLabel}>Units</Text>
+                  <Text style={styles.summaryValue}>{String(property.unitCount)}</Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                <PrimaryButton label="Payments" onPress={onOpenPayments} />
+                <PrimaryButton label="Invite Tenant" onPress={onOpenInvite} variant="secondary" />
+                <PrimaryButton label="Onboarding Queue" onPress={onOpenOnboardingStatus} variant="secondary" />
+              </View>
+            </View>
+          ))}
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Expand Portfolio</Text>
+          <Text style={styles.helper}>Use the landlord dashboard operations deck to add new buildings and units, then return here to manage them.</Text>
+          <PrimaryButton label="Invite New Tenant" onPress={onOpenInvite} />
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: onOpenDashboard },
+            { key: "properties", icon: "🏢", label: "Properties", active: true, onPress: () => {} },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: onOpenPayments },
+            { key: "tickets", icon: "🎫", label: "Tickets", active: false, onPress: onOpenTickets },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordPaymentsScreen({
+  data,
+  onBack,
+  onOpenDashboard,
+  onOpenProperties,
+  onOpenTickets,
+  onOpenDetail,
+  onOpenHistory,
+  visible = true,
+}: {
+  data: LandlordDashboard;
+  onBack: () => void;
+  onOpenDashboard: () => void;
+  onOpenProperties: () => void;
+  onOpenTickets: () => void;
+  onOpenDetail: (paymentId: number) => void;
+  onOpenHistory: () => void;
+  visible?: boolean;
+}) {
+  const { s: styles } = useT();
+  const pendingPayments = data.payments.filter((payment) => payment.status !== "succeeded" && payment.status !== "paid");
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock
+          title="Payments"
+          subtitle="Manage your cashflow and verify receipts."
+          onBack={onBack}
+        />
+
+        <View style={styles.panel}>
+          <TextInput style={styles.input} value="" editable={false} placeholder="Search by tenant name..." />
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <View style={[styles.selectChip, styles.selectChipActive]}>
+              <Text style={[styles.selectChipText, styles.selectChipTextActive]}>All</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Paid</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Pending</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Late</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <Text style={styles.sectionKicker}>Pending Confirmation</Text>
+            <Pressable onPress={onOpenHistory}>
+              <Text style={[styles.rowMeta, { fontSize: 12 }]}>History</Text>
+            </Pressable>
+          </View>
+          <View style={styles.tableLike}>
+            {pendingPayments.length === 0 ? (
+              <Text style={styles.helper}>No reported cash receipts are waiting for confirmation.</Text>
+            ) : (
+              pendingPayments.map((payment) => (
+                <View key={payment.id} style={[styles.tableRow, { borderLeftWidth: 3, borderLeftColor: "#ff635b" }]}>
+                  <View style={styles.tableMain}>
+                    <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
+                    <Text style={styles.rowMeta}>{payment.building_name} • {payment.unit_label}</Text>
+                  </View>
+                  <View style={styles.tableNumbers}>
+                    <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                    <Text style={styles.rowMeta}>{payment.status.replaceAll("_", " ")}</Text>
+                  </View>
+                  <PrimaryButton label="Confirm Receipt" onPress={() => onOpenDetail(payment.id)} />
+                </View>
+              ))
+            )}
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <Text style={styles.sectionKicker}>Recent Transactions</Text>
+            <Pressable onPress={onOpenHistory}>
+              <Text style={[styles.rowMeta, { fontSize: 12 }]}>View all</Text>
+            </Pressable>
+          </View>
+          <View style={styles.tableLike}>
+            {data.payments.slice(0, 5).map((payment) => (
+              <View key={payment.id} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
+                  <Text style={styles.rowMeta}>{payment.rent_month} • {payment.bank_name}</Text>
+                </View>
+                <View style={styles.tableNumbers}>
+                  <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                  <Text style={styles.rowMeta}>{payment.paid_on || "Awaiting"}</Text>
+                </View>
+                <StatusBadge status={payment.status} />
+              </View>
+            ))}
+          </View>
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: onOpenDashboard },
+            { key: "properties", icon: "🏢", label: "Properties", active: false, onPress: onOpenProperties },
+            { key: "payments", icon: "₹", label: "Payments", active: true, onPress: () => {} },
+            { key: "tickets", icon: "🎫", label: "Tickets", active: false, onPress: onOpenTickets },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordVerifyPaymentScreen({
+  payment,
+  onBack,
+  visible = true,
+}: {
+  payment: LandlordDashboard["payments"][number];
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [message, setMessage] = useState("");
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Verify Payment" subtitle="Review the reported payment details before updating the ledger." onBack={onBack} />
+
+        <View style={[styles.panel, { alignItems: "center" }]}>
+          <Text style={styles.summaryLabel}>Cash Payment Reported</Text>
+          <Text style={[styles.summaryValue, { marginTop: 4 }]}>{money(payment.amount)}</Text>
+          <Text style={styles.summaryNote}>{payment.rent_month}</Text>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Tenant</Text>
+          <Text style={styles.panelTitle}>{payment.tenant_name}</Text>
+          <Text style={styles.helper}>{payment.unit_label}, {payment.building_name}</Text>
+          <View style={styles.tableLike}>
+            <View style={styles.tableRow}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowMeta}>Payment type</Text>
+              </View>
+              <Text style={styles.rowValue}>{payment.bank_name || "Cash"}</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowMeta}>Reported on</Text>
+              </View>
+              <Text style={styles.rowValue}>{payment.paid_on || "Awaiting timestamp"}</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowMeta}>Reference</Text>
+              </View>
+              <Text style={styles.rowValue}>{payment.reference || "No receipt attached"}</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Verification Policy</Text>
+          <Text style={styles.helper}>By confirming receipt, you acknowledge the physical collection of this rent amount and notify the tenant through the updated ledger.</Text>
+          {message ? <Text style={[styles.helper, { color: t.accent }]}>{message}</Text> : null}
+          <PrimaryButton label="Confirm Receipt" onPress={() => setMessage("Receipt confirmation UI completed. Hook this to a landlord receipt-confirmation endpoint when available.")} fullWidth />
+          <PrimaryButton label="Decline & Raise Dispute" onPress={() => setMessage("Dispute flow placeholder added to match the reference flow.")} variant="secondary" fullWidth />
+        </View>
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordTransactionHistoryScreen({
+  data,
+  onBack,
+  visible = true,
+}: {
+  data: LandlordDashboard;
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { s: styles } = useT();
+  const totalRevenue = data.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const paidCount = data.payments.filter((payment) => payment.status === "succeeded" || payment.status === "paid").length;
+  const pendingCount = Math.max(data.payments.length - paidCount, 0);
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Transaction History" subtitle="Detailed overview of all financial activities across your portfolio." onBack={onBack} />
+
+        <View style={styles.summaryGrid}>
+          <SummaryCard label="Total Revenue" value={money(totalRevenue)} note="Across all payments" />
+          <SummaryCard label="Successfully Paid" value={String(paidCount)} note="Ledger entries cleared" />
+          <SummaryCard label="Awaiting Action" value={String(pendingCount)} note="Pending or late items" />
+        </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <View style={[styles.selectChip, styles.selectChipActive]}>
+              <Text style={[styles.selectChipText, styles.selectChipTextActive]}>All</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Paid</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Pending</Text>
+            </View>
+            <View style={styles.selectChip}>
+              <Text style={styles.selectChipText}>Late</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.tableLike}>
+          {data.payments.map((payment) => (
+            <View key={payment.id} style={styles.tableRow}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
+                <Text style={styles.rowMeta}>{payment.unit_label} • {payment.rent_month}</Text>
+              </View>
+              <View style={styles.tableNumbers}>
+                <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                <Text style={styles.rowMeta}>{payment.status.replaceAll("_", " ")}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordOnboardingStatusScreen({
+  data,
+  token,
+  onBack,
+  onOpenTenancy,
+  onInvite,
+  visible = true,
+}: {
+  data: LandlordDashboard;
+  token: string;
+  onBack: () => void;
+  onOpenTenancy: (tenancyId: number) => void;
+  onInvite: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState<Array<{ tenant: LandlordDashboard["tenants"][number]; status: OnboardingStatus | null }>>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      data.tenants.map(async (tenant) => {
+        try {
+          const status = await fetchOnboardingStatus(token, tenant.id);
+          return { tenant, status };
+        } catch {
+          return { tenant, status: null };
+        }
+      }),
+    )
+      .then((rows) => {
+        if (!cancelled) {
+          setItems(rows);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data.tenants, token]);
+
+  const activeFunnel = items.filter((item) => item.status?.onboarding_status !== "completed").length;
+  const idVerified = items.filter((item) => item.status?.documents.some((doc) => doc.verified)).length;
+  const waitingDeposit = items.filter((item) => item.status?.onboarding_status === "pending_deposit").length;
+
+  const progressForStatus = (status: OnboardingStatus | null) => {
+    switch (status?.onboarding_status) {
+      case "pending_deposit":
+        return 50;
+      case "pending_agreement":
+        return 75;
+      case "pending_first_rent":
+        return 90;
+      case "completed":
+        return 100;
+      default:
+        return 25;
+    }
+  };
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Onboarding Status" subtitle="Monitor verification cycles, deposits, and agreement progress for upcoming residents." onBack={onBack} />
+
+        <View style={styles.summaryGrid}>
+          <SummaryCard label="Active Funnel" value={String(activeFunnel)} note="Tenants not fully onboarded" />
+          <SummaryCard label="ID Verified" value={String(idVerified)} note="Document checks passed" />
+          <SummaryCard label="Waiting Deposit" value={String(waitingDeposit)} note="Action required" />
+        </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <Text style={styles.panelTitle}>Applicant Queue</Text>
+            <PrimaryButton label="Invite New Tenant" onPress={onInvite} variant="secondary" />
+          </View>
+          {loading ? <ActivityIndicator color={t.accent} /> : null}
+          <View style={styles.tableLike}>
+            {items.map(({ tenant, status }) => {
+              const progress = progressForStatus(status);
+              return (
+                <View key={tenant.id} style={styles.tableRow}>
+                  <View style={styles.tableMain}>
+                    <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
+                    <Text style={styles.rowMeta}>{tenant.building_name}, {tenant.unit_label}</Text>
+                    <View style={{ height: 6, borderRadius: 4, backgroundColor: t.border, marginTop: 10, overflow: "hidden" }}>
+                      <View style={{ height: 6, width: `${progress}%`, backgroundColor: progress >= 100 ? t.successText : t.accent }} />
+                    </View>
+                    <Text style={[styles.rowMeta, { marginTop: 6 }]}>{progress}% complete</Text>
+                  </View>
+                  <View style={{ gap: 8, alignItems: "flex-end" }}>
+                    <StatusBadge status={status?.onboarding_status || "pending_documents"} />
+                    <PrimaryButton label="Open" onPress={() => onOpenTenancy(tenant.id)} variant="secondary" />
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: onBack },
+            { key: "properties", icon: "🏢", label: "Properties", active: true, onPress: onBack },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: onBack },
+            { key: "tickets", icon: "🎫", label: "Tickets", active: false, onPress: onBack },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordInviteTenantScreen({
+  data,
+  token,
+  onBack,
+  onRefresh,
+  visible = true,
+}: {
+  data: LandlordDashboard;
+  token: string;
+  onBack: () => void;
+  onRefresh: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const vacantUnits = data.units.filter(
+    (unit) => !data.tenants.some((tenant) => tenant.unit_label === unit.label && tenant.building_name === unit.building_name),
+  );
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [leaseStart, setLeaseStart] = useState("");
+  const [monthlyRent, setMonthlyRent] = useState("");
+  const [securityDeposit, setSecurityDeposit] = useState("");
+  const [selectedUnitId, setSelectedUnitId] = useState<number | null>(vacantUnits[0]?.id ?? null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!selectedUnitId && vacantUnits[0]) {
+      setSelectedUnitId(vacantUnits[0].id);
+      setMonthlyRent(vacantUnits[0].monthly_rent);
+    }
+  }, [selectedUnitId, vacantUnits]);
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Invite New Tenant" subtitle="Use an existing tenant email or tenant code to assign a vacant unit and start onboarding." onBack={onBack} />
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Identity & Contact</Text>
+          <View style={styles.formGrid}>
+            <Field label="Full Name" value={name} onChangeText={setName} placeholder="e.g. Rahul Sharma" />
+            <Field label="Email Address" value={email} onChangeText={setEmail} placeholder="rahul@example.com" />
+            <Field label="Phone Number" value={phone} onChangeText={setPhone} placeholder="98765 43210" keyboardType="phone-pad" />
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Lease & Financials</Text>
+          <View style={styles.formGrid}>
+            <Field label="Lease Start Date" value={leaseStart} onChangeText={setLeaseStart} placeholder="dd/mm/yyyy" />
+            <Field label="Monthly Rent (₹)" value={monthlyRent} onChangeText={setMonthlyRent} keyboardType="numeric" />
+            <Field label="Security Deposit (₹)" value={securityDeposit} onChangeText={setSecurityDeposit} keyboardType="numeric" />
+          </View>
+          <Text style={styles.fieldLabel}>Assign to vacant unit</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            {vacantUnits.map((unit) => (
+              <Pressable
+                key={unit.id}
+                style={[styles.selectChip, selectedUnitId === unit.id && styles.selectChipActive]}
+                onPress={() => {
+                  setSelectedUnitId(unit.id);
+                  setMonthlyRent(unit.monthly_rent);
+                }}
+              >
+                <Text style={[styles.selectChipText, selectedUnitId === unit.id && styles.selectChipTextActive]}>
+                  {unit.building_name} / {unit.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          {message ? <Text style={[styles.helper, { color: message.startsWith("✓") ? t.successText : t.dangerText }]}>{message}</Text> : null}
+          <PrimaryButton
+            label={busy ? "Sending..." : "Send Invitation"}
+            disabled={busy || !email.trim() || !selectedUnitId}
+            onPress={async () => {
+              setBusy(true);
+              setMessage("");
+              try {
+                await createTenancy(token, { tenant_identifier: email.trim(), unit_id: selectedUnitId! });
+                setMessage("✓ Invitation flow mapped: tenant linked to the selected unit.");
+                onRefresh();
+              } catch (error) {
+                setMessage(readError(error));
+              } finally {
+                setBusy(false);
+              }
+            }}
+            fullWidth
+          />
+          <Text style={styles.helper}>The backend currently links an existing tenant by email or tenant code. A true magic-link invite endpoint would complete this reference flow.</Text>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Privacy & Trust</Text>
+          <Text style={styles.helper}>RentFlo encrypts tenant information. You’ll be notified as they complete document checks and agreement steps.</Text>
+        </View>
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function LandlordUnitInspectionScreen({
+  token,
+  tenancyId,
+  onBack,
+  onRefresh,
+  visible = true,
+}: {
+  token: string;
+  tenancyId: number;
+  onBack: () => void;
+  onRefresh: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [detail, setDetail] = useState<OffboardingInfo | null>(null);
+  const [notStarted, setNotStarted] = useState(false);
+  const [message, setMessage] = useState("");
+  const [deductions, setDeductions] = useState("");
+  const [reasons, setReasons] = useState("");
+  const [handoffDocUrl, setHandoffDocUrl] = useState("");
+  const [checklist, setChecklist] = useState({
+    walls: "pass",
+    plumbing: "pass",
+    electrical: "pass",
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await fetchOffboardingDetail(token, tenancyId);
+      setDetail(result);
+      setNotStarted(false);
+    } catch (error) {
+      if (readError(error).includes("not initiated")) {
+        setNotStarted(true);
+        setDetail(null);
+      } else {
+        setMessage(readError(error));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [tenancyId, token]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleStart = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await initiateOffboarding(token, { tenancy_id: tenancyId, deductions: deductions || undefined, deduction_reasons: reasons || undefined });
+      await load();
+      setMessage("Inspection flow started.");
+    } catch (error) {
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAdvance = async () => {
+    if (!detail) {
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      if (detail.status === "initiated") {
+        await settleDeposit(token, { tenancy_id: tenancyId, deductions: deductions || undefined, deduction_reasons: reasons || undefined });
+        setMessage("Inspection submitted and deposit settled.");
+      } else if (detail.status === "deposit_settled" || detail.status === "final_rent_paid") {
+        await completeHandoff(token, { tenancy_id: tenancyId, handoff_document_url: handoffDocUrl || undefined });
+        setMessage("Unit marked under maintenance.");
+      } else if (detail.status === "under_maintenance") {
+        const result = await confirmMaintenanceDone(token, tenancyId);
+        setMessage(result.detail);
+        onRefresh();
+      }
+      await load();
+    } catch (error) {
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const actionLabel = notStarted
+    ? "Start Inspection Flow"
+    : detail?.status === "initiated"
+      ? "Submit Inspection & Update Status"
+      : detail?.status === "deposit_settled" || detail?.status === "final_rent_paid"
+        ? "Mark Under Maintenance"
+        : detail?.status === "under_maintenance"
+          ? "Available for New Tenant"
+          : "Inspection Complete";
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Unit Exit Inspection" subtitle="Review the unit condition, capture deductions, and move the property through handoff." onBack={onBack} />
+        {loading ? <ActivityIndicator color={t.accent} /> : null}
+        {message ? <Text style={[styles.helper, { color: t.accent }]}>{message}</Text> : null}
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Inspection Checklist</Text>
+          <View style={styles.tableLike}>
+            {([
+              { key: "walls", label: "Walls & Paint" },
+              { key: "plumbing", label: "Plumbing & Fixtures" },
+              { key: "electrical", label: "Electrical Points" },
+            ] as const).map((item) => (
+              <View key={item.key} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{item.label}</Text>
+                </View>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {(["pass", "fail"] as const).map((value) => (
+                    <Pressable
+                      key={value}
+                      style={[styles.selectChip, checklist[item.key] === value && styles.selectChipActive]}
+                      onPress={() => setChecklist((current) => ({ ...current, [item.key]: value }))}
+                    >
+                      <Text style={[styles.selectChipText, checklist[item.key] === value && styles.selectChipTextActive]}>
+                        {value.toUpperCase()}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Damage Evidence</Text>
+          <Text style={styles.helper}>Upload controls are represented here to match the reference flow. Connect file upload when the backend supports evidence attachments.</Text>
+          <View style={{ flexDirection: "row", gap: 12 }}>
+            <View style={[styles.summaryCard, { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 140 }]}>
+              <Text style={styles.summaryLabel}>Upload</Text>
+              <Text style={styles.helper}>Add photo of the issue</Text>
+            </View>
+            <View style={[styles.summaryCard, { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 140 }]}>
+              <Text style={styles.summaryLabel}>Preview</Text>
+              <Text style={styles.helper}>Damage image placeholder</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Update Unit Status</Text>
+          <View style={styles.formGrid}>
+            <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
+            <Field label="Reasons" value={reasons} onChangeText={setReasons} placeholder="Painting, cleaning, repairs" />
+            <Field label="Handoff Document URL" value={handoffDocUrl} onChangeText={setHandoffDocUrl} placeholder="https://..." />
+          </View>
+          {!detail?.status || detail.status !== "completed" ? (
+            <PrimaryButton
+              label={busy ? "Processing..." : actionLabel}
+              onPress={notStarted ? handleStart : handleAdvance}
+              disabled={busy || (!notStarted && detail?.status === "completed")}
+              fullWidth
+            />
+          ) : (
+            <Text style={[styles.helper, { color: t.successText }]}>This unit is now available for a new tenant.</Text>
+          )}
+        </View>
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function TenantPaymentsReferenceScreen({
+  data,
+  paymentForm,
+  setPaymentForm,
+  onSubmit,
+  busy,
+  onBack,
+  onOpenMaintenance,
+  onOpenManagement,
+  visible = true,
+}: {
+  data: TenantDashboard & { tenancy: NonNullable<TenantDashboard["tenancy"]> };
+  paymentForm: InitiatePaymentInput;
+  setPaymentForm: (value: InitiatePaymentInput) => void;
+  onSubmit: () => void;
+  busy: boolean;
+  onBack: () => void;
+  onOpenMaintenance: () => void;
+  onOpenManagement: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [message, setMessage] = useState("");
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Payments" subtitle="Pay rent, choose a method, and review your payment history." onBack={onBack} />
+
+        <LinearGradient
+          colors={[t.heroStart, t.heroEnd]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientHero}
+        >
+          <View style={styles.gradientHeroInner}>
+            <Text style={styles.gradientHeroEyebrow}>Rent Due</Text>
+            <Text style={styles.gradientHeroTitle}>{money(paymentForm.amount || data.current_month_balance || data.tenancy.monthly_rent)}</Text>
+            <Text style={styles.gradientHeroText}>Due date reflected for {paymentForm.rent_month || data.current_month}. Pay instantly with Razorpay from inside RentFlo.</Text>
+            <PrimaryButton label={busy ? "Processing..." : "Pay with Razorpay"} onPress={onSubmit} disabled={busy} />
+          </View>
+        </LinearGradient>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Other Online Methods</Text>
+          <View style={styles.tableLike}>
+            <Pressable style={styles.tableRow} onPress={onSubmit}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowTitle}>Pay via UPI</Text>
+                <Text style={styles.rowMeta}>Instant, 0% convenience fee</Text>
+              </View>
+              <Text style={styles.rowMeta}>›</Text>
+            </Pressable>
+            <Pressable style={styles.tableRow} onPress={onSubmit}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowTitle}>Pay via Card</Text>
+                <Text style={styles.rowMeta}>Credit, Debit or Prepaid</Text>
+              </View>
+              <Text style={styles.rowMeta}>›</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>Offline Payment</Text>
+          <Text style={styles.helper}>Cash payments require landlord confirmation before they appear in your payment history.</Text>
+          {message ? <Text style={[styles.helper, { color: t.accent }]}>{message}</Text> : null}
+          <PrimaryButton label="Mark as Paid (Cash)" onPress={() => setMessage("Cash-payment reporting UI added to match the reference flow. Connect this to a tenant cash-report endpoint when available.")} variant="secondary" fullWidth />
+        </View>
+
+        <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <Text style={styles.panelTitle}>Payment history</Text>
+            <Text style={styles.rowMeta}>View all</Text>
+          </View>
+          <View style={styles.tableLike}>
+            {data.payments.map((payment) => (
+              <View key={payment.id} style={styles.tableRow}>
+                <View style={styles.tableMain}>
+                  <Text style={styles.rowTitle}>{payment.rent_month}</Text>
+                  <Text style={styles.rowMeta}>Paid on {payment.paid_on || "Awaiting confirmation"}</Text>
+                </View>
+                <View style={styles.tableNumbers}>
+                  <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                  <StatusBadge status={payment.status} />
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Pressable
+            style={[styles.tableRow, { backgroundColor: t.surfaceLowest, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 16 }]}
+            onPress={() => setMessage("Yearly rent summary flow mapped. Connect this to an HRA summary export endpoint when available.")}
+          >
+            <View style={[styles.badge, { width: 44, height: 44, borderRadius: 14, backgroundColor: t.primaryMuted, justifyContent: "center" }]}>
+              <Text style={[styles.badgeText, { color: t.accent, fontSize: 16 }]}>🧾</Text>
+            </View>
+            <View style={styles.tableMain}>
+              <Text style={styles.rowTitle}>Download Yearly Rent Summary (HRA)</Text>
+              <Text style={styles.rowMeta}>Selected account: {data.bank_accounts[0]?.bank_name || "No account configured"}</Text>
+            </View>
+          </Pressable>
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: onBack },
+            { key: "payments", icon: "₹", label: "Payments", active: true, onPress: () => {} },
+            { key: "maintenance", icon: "🛠", label: "Maintenance", active: false, onPress: onOpenMaintenance },
+            { key: "management", icon: "📄", label: "Management", active: false, onPress: onOpenManagement },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function TenantSettlementScreen({
+  detail,
+  onBack,
+  visible = true,
+}: {
+  detail: OffboardingInfo;
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [message, setMessage] = useState("");
+  const depositAmount = Number(detail.deposit?.amount || 0);
+  const deductions = Number(detail.deposit?.deductions || 0);
+  const refund = Number(detail.deposit?.refund_amount || Math.max(depositAmount - deductions, 0));
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Settlement Details" subtitle="Review the deduction summary and final refund amount for your move-out." onBack={onBack} />
+
+        <LinearGradient
+          colors={[t.heroStart, t.heroEnd]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientHero}
+        >
+          <View style={styles.gradientHeroInner}>
+            <Text style={styles.gradientHeroEyebrow}>Original Security Deposit</Text>
+            <Text style={styles.gradientHeroTitle}>{money(depositAmount)}</Text>
+            <Text style={styles.gradientHeroText}>Held in escrow for {detail.building_name} / {detail.unit_label}.</Text>
+          </View>
+        </LinearGradient>
+
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Breakdown of deductions</Text>
+          <View style={styles.tableLike}>
+            <View style={styles.tableRow}>
+              <View style={styles.tableMain}>
+                <Text style={styles.rowTitle}>Cleaning charges</Text>
+                <Text style={styles.rowMeta}>{detail.deposit?.deduction_reasons || "Move-out deductions applied by landlord"}</Text>
+              </View>
+              <Text style={[styles.rowValue, { color: t.dangerText }]}>- {money(deductions)}</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Settlement ledger</Text>
+          <View style={styles.tableLike}>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowMeta}>Total deposit held</Text>
+              <Text style={styles.rowValue}>{money(depositAmount)}</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowMeta}>Aggregate deductions</Text>
+              <Text style={[styles.rowValue, { color: t.dangerText }]}>- {money(deductions)}</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowMeta}>Final refund amount</Text>
+              <Text style={[styles.rowValue, { color: t.successText }]}>{money(refund)}</Text>
+            </View>
+          </View>
+          {message ? <Text style={[styles.helper, { color: t.accent }]}>{message}</Text> : null}
+          <PrimaryButton label="Accept Settlement" onPress={() => setMessage("Settlement accepted in the UI flow. Connect this to a tenant settlement-accept endpoint when available.")} fullWidth />
+          <PrimaryButton label="Raise a Dispute" onPress={() => setMessage("Dispute path placeholder added to mirror the reference flow.")} variant="secondary" fullWidth />
+        </View>
+
+        <BottomTabBar
+          items={[
+            { key: "properties", icon: "🏢", label: "Properties", active: false, onPress: onBack },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: onBack },
+            { key: "leases", icon: "📄", label: "Leases", active: true, onPress: () => {} },
+            { key: "more", icon: "⋯", label: "More", active: false, onPress: onBack },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function TenantMoveOutConfirmationScreen({
+  detail,
+  onBack,
+  visible = true,
+}: {
+  detail: OffboardingInfo;
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { s: styles } = useT();
+
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Move-out Confirmation" subtitle="Review the final handoff checklist and refund status." onBack={onBack} />
+
+        <View style={[styles.panel, { alignItems: "center" }]}>
+          <Text style={styles.summaryLabel}>Final Step</Text>
+          <Text style={styles.panelTitle}>100% Complete</Text>
+          <Text style={styles.helper}>Your journey at {detail.building_name}, {detail.unit_label} is nearly complete.</Text>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Confirmation checklist</Text>
+          <View style={styles.tableLike}>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowTitle}>All keys returned</Text>
+              <Text style={styles.rowMeta}>Completed</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowTitle}>All utilities cleared</Text>
+              <Text style={styles.rowMeta}>Completed</Text>
+            </View>
+            <View style={styles.tableRow}>
+              <Text style={styles.rowTitle}>Personal belongings removed</Text>
+              <Text style={styles.rowMeta}>Completed</Text>
+            </View>
+          </View>
+        </View>
+
+        <LinearGradient
+          colors={["#1a237e", "#000666"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientHero}
+        >
+          <View style={styles.gradientHeroInner}>
+            <Text style={styles.gradientHeroEyebrow}>Estimated Refund</Text>
+            <Text style={styles.gradientHeroTitle}>{money(detail.deposit?.refund_amount || 0)}</Text>
+            <Text style={styles.gradientHeroText}>Status: {detail.status.replaceAll("_", " ")}</Text>
+          </View>
+        </LinearGradient>
+
+        <BottomTabBar
+          items={[
+            { key: "properties", icon: "🏢", label: "Properties", active: false, onPress: onBack },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: onBack },
+            { key: "leases", icon: "📄", label: "Leases", active: true, onPress: () => {} },
+            { key: "more", icon: "⋯", label: "More", active: false, onPress: onBack },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function TenantLeaseOverviewScreen({
+  onBack,
+  visible = true,
+}: {
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { s: styles } = useT();
+  return (
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
+        <ScreenTitleBlock title="Lease Management" subtitle="No active onboarding or move-out step is pending right now." onBack={onBack} />
+        <View style={styles.panel}>
+          <Text style={styles.sectionKicker}>All Clear</Text>
+          <Text style={styles.helper}>Use this area for agreement download, lease extensions, and future move-out actions as those endpoints are added.</Text>
+        </View>
+        <BottomTabBar
+          items={[
+            { key: "dashboard", icon: "⌂", label: "Dashboard", active: false, onPress: onBack },
+            { key: "payments", icon: "₹", label: "Payments", active: false, onPress: onBack },
+            { key: "maintenance", icon: "🛠", label: "Maintenance", active: false, onPress: onBack },
+            { key: "management", icon: "📄", label: "Management", active: true, onPress: () => {} },
+          ]}
+        />
+      </View>
+    </AppearOnMount>
+  );
+}
+
+function TenantLeaseManagementScreen({
+  token,
+  tenancyId,
+  onBack,
+  visible = true,
+}: {
+  token: string;
+  tenancyId: number;
+  onBack: () => void;
+  visible?: boolean;
+}) {
+  const { t, s: styles } = useT();
+  const [loading, setLoading] = useState(true);
+  const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
+  const [offboarding, setOffboarding] = useState<OffboardingInfo | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const onboardingResult = await fetchOnboardingStatus(token, tenancyId);
+        if (!cancelled) {
+          setOnboarding(onboardingResult);
+        }
+        try {
+          const offboardingResult = await fetchOffboardingDetail(token, tenancyId);
+          if (!cancelled) {
+            setOffboarding(offboardingResult);
+          }
+        } catch {
+          if (!cancelled) {
+            setOffboarding(null);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setOnboarding(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenancyId, token]);
+
+  if (loading) {
+    return (
+      <View style={[styles.panel, { alignItems: "center", paddingVertical: 40 }]}>
+        <ActivityIndicator color={t.accent} size="large" />
+      </View>
+    );
+  }
+
+  if (onboarding && onboarding.onboarding_status !== "completed") {
+    return <OnboardingScreen token={token} tenancyId={tenancyId} isLandlord={false} onBack={onBack} onRefresh={() => {}} visible={visible} />;
+  }
+
+  if (offboarding && ["initiated", "deposit_settled", "final_rent_paid"].includes(offboarding.status)) {
+    return <TenantSettlementScreen detail={offboarding} onBack={onBack} visible={visible} />;
+  }
+
+  if (offboarding && ["handoff_complete", "under_maintenance", "completed"].includes(offboarding.status)) {
+    return <TenantMoveOutConfirmationScreen detail={offboarding} onBack={onBack} visible={visible} />;
+  }
+
+  return <TenantLeaseOverviewScreen onBack={onBack} visible={visible} />;
+}
+
 // ============================================================================
 // PREMIUM ANALYTICS DETAIL SCREENS
 // ============================================================================
@@ -4740,24 +6079,23 @@ function TicketsScreen({
   isLandlord,
   onBack,
   visible = true,
+  bottomTabs,
 }: {
   token: string;
   isLandlord: boolean;
   onBack: () => void;
   visible?: boolean;
+  bottomTabs?: Array<{ key: string; icon: string; label: string; active: boolean; onPress: () => void }>;
 }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [tickets, setTickets] = useState<TicketItem[]>([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-
-  // Create form
-  const [subject, setSubject] = useState("");
+  const [issueType, setIssueType] = useState("Plumbing");
+  const [priority, setPriority] = useState<"Low" | "Medium" | "High">("Medium");
   const [description, setDescription] = useState("");
-
-  // Update form (landlord)
+  const [landlordFilter, setLandlordFilter] = useState<"all" | "open" | "in_progress" | "resolved">("all");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editStatus, setEditStatus] = useState("");
   const [editProvider, setEditProvider] = useState("");
@@ -4774,15 +6112,13 @@ function TicketsScreen({
   useEffect(() => { void load(); }, [load]);
 
   async function handleCreate() {
-    if (!subject.trim()) return;
+    if (!description.trim()) return;
     setBusy(true);
     setMsg("");
     try {
-      await createTicket(token, { subject, description });
+      await createTicket(token, { subject: `${issueType} • ${priority}`, description });
       setMsg("Ticket created.");
-      setSubject("");
       setDescription("");
-      setShowCreate(false);
       await load();
     } catch (e) { setMsg(readError(e)); } finally { setBusy(false); }
   }
@@ -4809,159 +6145,239 @@ function TicketsScreen({
     resolved: t.successText,
     closed: t.textSecondary,
   };
+  const activeCount = tickets.filter((ticket) => ticket.status !== "resolved" && ticket.status !== "closed").length;
+  const visibleTickets = landlordFilter === "all" ? tickets : tickets.filter((ticket) => ticket.status === landlordFilter);
 
   return (
     <AppearOnMount visible={visible}>
       <View style={styles.stack}>
-        <View style={styles.navChips}>
-          <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
-          <ActionChip icon="🎫" label="Tickets" active={true} onPress={() => {}} />
-        </View>
-        <LinearGradient
-          colors={[t.heroStart, t.heroEnd]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.gradientHero}
-        >
-          <View style={styles.gradientHeroInner}>
-            <Text style={styles.gradientHeroEyebrow}>{isLandlord ? "Maintenance Requests" : "Support Requests"}</Text>
-            <Text style={styles.gradientHeroTitle}>Ticket workspace</Text>
-            <Text style={styles.gradientHeroText}>
-              {isLandlord
-                ? "Review open issues, update providers, and close the loop on maintenance work."
-                : "Raise issues, attach receipts, and track progress without leaving your tenancy flow."}
-            </Text>
-          </View>
-        </LinearGradient>
-        {msg ? <Text style={[styles.helper, { marginTop: 4 }]}>{msg}</Text> : null}
+        <ScreenTitleBlock
+          title={isLandlord ? "Tickets" : "Report a Problem"}
+          subtitle={
+            isLandlord
+              ? `Manage ${activeCount} active maintenance requests`
+              : "Submit a maintenance request and we'll handle the rest."
+          }
+          onBack={onBack}
+        />
 
-      {!isLandlord && (
-        <View style={{ marginTop: 8 }}>
-          <AppearOnMount visible={showCreate} unmountOnExit>
-            {showCreate ? (
-              <View style={styles.panel}>
-                <Text style={styles.sectionKicker}>New Ticket</Text>
-                <View style={styles.formGrid}>
-                  <Field label="Subject" value={subject} onChangeText={setSubject} placeholder="e.g. Leaking tap in bathroom" />
-                  <Field label="Description" value={description} onChangeText={setDescription} placeholder="Detailed description..." />
-                </View>
-                <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-                  <PrimaryButton label={busy ? "Creating..." : "Submit Ticket"} onPress={handleCreate} disabled={busy} />
-                  <Pressable onPress={() => setShowCreate(false)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
-                </View>
+        {msg ? <Text style={[styles.helper, { color: msg.startsWith("Ticket created") || msg.startsWith("Ticket updated") ? t.successText : t.textSecondary }]}>{msg}</Text> : null}
+
+        {isLandlord ? (
+          <>
+            <View style={styles.panel}>
+              <Text style={styles.sectionKicker}>Quick Filters</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                {([
+                  { key: "all", label: "All Tickets" },
+                  { key: "open", label: "Open" },
+                  { key: "in_progress", label: "In Progress" },
+                  { key: "resolved", label: "Resolved" },
+                ] as const).map((filter) => (
+                  <Pressable
+                    key={filter.key}
+                    style={[styles.selectChip, landlordFilter === filter.key && styles.selectChipActive]}
+                    onPress={() => setLandlordFilter(filter.key)}
+                  >
+                    <Text style={[styles.selectChipText, landlordFilter === filter.key && styles.selectChipTextActive]}>{filter.label}</Text>
+                  </Pressable>
+                ))}
               </View>
-            ) : null}
-          </AppearOnMount>
-          {!showCreate ? (
-            <PrimaryButton label="+ Raise a Ticket" onPress={() => setShowCreate(true)} fullWidth />
-          ) : null}
-        </View>
-      )}
-
-      {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
-
-      {tickets.length === 0 && !loading ? (
-        <Text style={[styles.helper, { marginTop: 16 }]}>No tickets yet.</Text>
-      ) : (
-        <View style={[styles.tableLike, { marginTop: 16 }]}>
-          {tickets.map((ticket) => (
-            <View key={ticket.id} style={[styles.panel, { marginBottom: 8 }]}>
-              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                <Text style={styles.rowTitle}>#{ticket.id} – {ticket.subject}</Text>
-                <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: (statusColors[ticket.status] || t.textSecondary) + "18" }}>
-                  <Text style={{ fontSize: 11, fontWeight: "700", color: statusColors[ticket.status] || t.textSecondary }}>
-                    {ticket.status.replace("_", " ").toUpperCase()}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.rowMeta}>{ticket.building_name} / {ticket.unit_label} • {ticket.tenant_name}</Text>
-              <Text style={[styles.helper, { marginTop: 4 }]}>{ticket.description}</Text>
-              {ticket.resolution_provider ? <Text style={styles.rowMeta}>Provider: {ticket.resolution_provider.replace("_", " ")}</Text> : null}
-              {ticket.resolution_notes ? <Text style={styles.rowMeta}>Notes: {ticket.resolution_notes}</Text> : null}
-              {ticket.receipt_url ? <Text style={styles.rowMeta}>Receipt: {ticket.receipt_url}</Text> : null}
-
-              {/* Landlord can update ticket */}
-              {isLandlord && ticket.status !== "closed" && (
-                <>
-                  <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
-                    {editingId === ticket.id ? (
-                    <View style={[styles.formGrid, { marginTop: 8 }]}>
-                      <View>
-                        <Text style={styles.fieldLabel}>Status</Text>
-                        <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
-                          {(["in_progress", "resolved", "closed"] as const).map((s) => (
-                            <Pressable
-                              key={s}
-                              onPress={() => setEditStatus(s)}
-                              style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editStatus === s ? t.primary : t.inputBg, borderWidth: 1, borderColor: editStatus === s ? t.primary : t.inputBorder }}
-                            >
-                              <Text style={{ color: editStatus === s ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{s.replace("_", " ").toUpperCase()}</Text>
-                            </Pressable>
-                          ))}
-                        </View>
-                      </View>
-                      <View>
-                        <Text style={styles.fieldLabel}>Resolution by</Text>
-                        <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
-                          {(["urban_clap", "owner", "tenant"] as const).map((p) => (
-                            <Pressable
-                              key={p}
-                              onPress={() => setEditProvider(p)}
-                              style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editProvider === p ? t.primary : t.inputBg, borderWidth: 1, borderColor: editProvider === p ? t.primary : t.inputBorder }}
-                            >
-                              <Text style={{ color: editProvider === p ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{p === "urban_clap" ? "Urban Clap" : p === "owner" ? "Owner" : "Tenant"}</Text>
-                            </Pressable>
-                          ))}
-                        </View>
-                      </View>
-                      <Field label="Resolution notes" value={editNotes} onChangeText={setEditNotes} placeholder="What was done..." />
-                      <Field label="Receipt URL (optional)" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://..." />
-                      <View style={{ flexDirection: "row", gap: 8 }}>
-                        <PrimaryButton label={busy ? "Saving..." : "Save"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
-                        <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
-                      </View>
-                    </View>
-                    ) : null}
-                  </AppearOnMount>
-                  {editingId !== ticket.id ? (
-                    <Pressable
-                      style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
-                      onPress={() => { setEditingId(ticket.id); setEditStatus(ticket.status); setEditProvider(ticket.resolution_provider); setEditNotes(ticket.resolution_notes); setEditReceipt(ticket.receipt_url); }}
-                    >
-                      <Text style={[styles.removeButtonText, { color: t.primary }]}>Update Ticket</Text>
-                    </Pressable>
-                  ) : null}
-                </>
-              )}
-
-              {/* Tenant can upload receipt */}
-              {!isLandlord && ticket.status !== "closed" && (
-                <>
-                  <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
-                    {editingId === ticket.id ? (
-                    <View style={[styles.formGrid, { marginTop: 8 }]}>
-                      <Field label="Receipt URL" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://receipt..." />
-                      <View style={{ flexDirection: "row", gap: 8 }}>
-                        <PrimaryButton label={busy ? "Saving..." : "Upload Receipt"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
-                        <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
-                      </View>
-                    </View>
-                    ) : null}
-                  </AppearOnMount>
-                  {editingId !== ticket.id ? (
-                    <Pressable
-                      style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
-                      onPress={() => { setEditingId(ticket.id); setEditReceipt(ticket.receipt_url); }}
-                    >
-                      <Text style={[styles.removeButtonText, { color: t.primary }]}>Add Receipt</Text>
-                    </Pressable>
-                  ) : null}
-                </>
-              )}
             </View>
-          ))}
-        </View>
-      )}
+
+            <View style={styles.panel}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <Text style={styles.panelTitle}>Active Requests</Text>
+                <Text style={styles.rowMeta}>Refine</Text>
+              </View>
+              {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
+              <View style={[styles.tableLike, { marginTop: 12 }]}>
+                {visibleTickets.map((ticket) => (
+                  <View key={ticket.id} style={[styles.panel, { borderRadius: 24, borderWidth: 1, borderColor: t.borderStrong, padding: 18 }]}>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                      <View style={{ flex: 1, gap: 8 }}>
+                        <View style={[styles.badge, ticket.status === "open" ? styles.warnBadge : ticket.status === "resolved" ? styles.goodBadge : styles.neutralBadge, { alignSelf: "flex-start" }]}>
+                          <Text style={styles.badgeText}>{ticket.status.replaceAll("_", " ").toUpperCase()}</Text>
+                        </View>
+                        <Text style={styles.rowTitle}>{ticket.subject}</Text>
+                        <Text style={styles.rowMeta}>{ticket.building_name} • {ticket.unit_label}</Text>
+                        <Text style={styles.rowMeta}>{ticket.tenant_name}</Text>
+                      </View>
+                      <Text style={[styles.rowMeta, { fontSize: 18 }]}>›</Text>
+                    </View>
+
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+                      <Text style={[styles.rowMeta, { color: statusColors[ticket.status] || t.textSecondary }]}>● {ticket.status.replaceAll("_", " ")}</Text>
+                      <Text style={styles.rowMeta}>
+                        {ticket.resolution_provider
+                          ? `Assigned: ${ticket.resolution_provider === "urban_clap" ? "Urban Clap" : ticket.resolution_provider}`
+                          : "Assign Vendor"}
+                      </Text>
+                    </View>
+
+                    <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
+                      {editingId === ticket.id ? (
+                        <View style={[styles.formGrid, { marginTop: 16 }]}>
+                          <View>
+                            <Text style={styles.fieldLabel}>Status</Text>
+                            <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                              {(["in_progress", "resolved", "closed"] as const).map((status) => (
+                                <Pressable
+                                  key={status}
+                                  onPress={() => setEditStatus(status)}
+                                  style={[styles.selectChip, editStatus === status && styles.selectChipActive]}
+                                >
+                                  <Text style={[styles.selectChipText, editStatus === status && styles.selectChipTextActive]}>
+                                    {status.replaceAll("_", " ")}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                          </View>
+                          <View>
+                            <Text style={styles.fieldLabel}>Resolution by</Text>
+                            <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                              {(["urban_clap", "owner", "tenant"] as const).map((provider) => (
+                                <Pressable
+                                  key={provider}
+                                  onPress={() => setEditProvider(provider)}
+                                  style={[styles.selectChip, editProvider === provider && styles.selectChipActive]}
+                                >
+                                  <Text style={[styles.selectChipText, editProvider === provider && styles.selectChipTextActive]}>
+                                    {provider === "urban_clap" ? "Urban Clap" : provider[0].toUpperCase() + provider.slice(1)}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                          </View>
+                          <Field label="Resolution notes" value={editNotes} onChangeText={setEditNotes} placeholder="What was done..." />
+                          <Field label="Receipt URL (optional)" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://..." />
+                          <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                            <PrimaryButton label={busy ? "Saving..." : "Save"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                            <PrimaryButton label="Cancel" onPress={() => setEditingId(null)} variant="secondary" />
+                          </View>
+                        </View>
+                      ) : null}
+                    </AppearOnMount>
+
+                    {editingId !== ticket.id && ticket.status !== "closed" ? (
+                      <PrimaryButton
+                        label={ticket.resolution_provider ? "Update Ticket" : "Assign Vendor"}
+                        onPress={() => {
+                          setEditingId(ticket.id);
+                          setEditStatus(ticket.status);
+                          setEditProvider(ticket.resolution_provider);
+                          setEditNotes(ticket.resolution_notes);
+                          setEditReceipt(ticket.receipt_url);
+                        }}
+                        variant="secondary"
+                        fullWidth
+                      />
+                    ) : null}
+                  </View>
+                ))}
+                {!loading && visibleTickets.length === 0 ? <Text style={styles.helper}>No tickets match the current filter.</Text> : null}
+              </View>
+            </View>
+          </>
+        ) : (
+          <>
+            <View style={styles.panel}>
+              <Text style={styles.fieldLabel}>Issue Type</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                {["Plumbing", "Electrical", "General"].map((type) => (
+                  <Pressable
+                    key={type}
+                    style={[styles.selectChip, issueType === type && styles.selectChipActive]}
+                    onPress={() => setIssueType(type)}
+                  >
+                    <Text style={[styles.selectChipText, issueType === type && styles.selectChipTextActive]}>{type}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={[styles.fieldLabel, { marginTop: 18 }]}>Priority Level</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                {(["Low", "Medium", "High"] as const).map((level) => (
+                  <Pressable
+                    key={level}
+                    style={[styles.selectChip, priority === level && styles.selectChipActive]}
+                    onPress={() => setPriority(level)}
+                  >
+                    <Text style={[styles.selectChipText, priority === level && styles.selectChipTextActive]}>{level}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <View style={{ marginTop: 18 }}>
+                <Field label="Description" value={description} onChangeText={setDescription} placeholder="Tell us what's happening..." />
+              </View>
+
+              <View style={[styles.summaryCard, { marginTop: 18, alignItems: "center", borderWidth: 1, borderStyle: "dashed", borderColor: t.borderStrong, backgroundColor: t.surfaceLowest }]}>
+                <Text style={[styles.badgeText, { fontSize: 22, color: t.accent }]}>📷</Text>
+                <Text style={[styles.rowTitle, { marginTop: 10 }]}>Add photo of the issue</Text>
+                <Text style={styles.rowMeta}>PNG, JPG up to 10MB</Text>
+              </View>
+
+              <View style={{ marginTop: 18 }}>
+                <PrimaryButton label={busy ? "Submitting..." : "Submit Request >"} onPress={handleCreate} disabled={busy || !description.trim()} fullWidth />
+              </View>
+            </View>
+
+            <View style={styles.panel}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={styles.panelTitle}>Active Tickets</Text>
+                <View style={[styles.badge, styles.neutralBadge]}>
+                  <Text style={styles.badgeText}>{tickets.length} Total</Text>
+                </View>
+              </View>
+              {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
+              <View style={[styles.tableLike, { marginTop: 12 }]}>
+                {tickets.map((ticket) => (
+                  <View key={ticket.id} style={[styles.panel, { borderRadius: 22, padding: 18 }]}>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.rowTitle}>{ticket.subject}</Text>
+                        <Text style={styles.rowMeta}>Ticket #{ticket.id} • Reported {formatDisplayDate(ticket.created_at)}</Text>
+                      </View>
+                      <View style={[styles.badge, ticket.status === "resolved" ? styles.goodBadge : ticket.status === "in_progress" ? styles.neutralBadge : styles.warnBadge]}>
+                        <Text style={styles.badgeText}>{ticket.status.replaceAll("_", " ")}</Text>
+                      </View>
+                    </View>
+                    {ticket.resolution_provider ? <Text style={[styles.rowMeta, { marginTop: 10 }]}>Assigned to {ticket.resolution_provider === "urban_clap" ? "Urban Clap" : ticket.resolution_provider}</Text> : null}
+
+                    <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
+                      {editingId === ticket.id ? (
+                        <View style={[styles.formGrid, { marginTop: 14 }]}>
+                          <Field label="Receipt URL" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://receipt..." />
+                          <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                            <PrimaryButton label={busy ? "Saving..." : "Upload Receipt"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                            <PrimaryButton label="Cancel" onPress={() => setEditingId(null)} variant="secondary" />
+                          </View>
+                        </View>
+                      ) : null}
+                    </AppearOnMount>
+
+                    {editingId !== ticket.id && ticket.status !== "closed" ? (
+                      <Pressable
+                        style={[styles.removeButton, { marginTop: 12, backgroundColor: t.primaryMuted }]}
+                        onPress={() => {
+                          setEditingId(ticket.id);
+                          setEditReceipt(ticket.receipt_url);
+                        }}
+                      >
+                        <Text style={[styles.removeButtonText, { color: t.primary }]}>Add Receipt</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ))}
+                {!loading && tickets.length === 0 ? <Text style={styles.helper}>No active tickets yet.</Text> : null}
+              </View>
+            </View>
+          </>
+        )}
+
+        {bottomTabs ? <BottomTabBar items={bottomTabs} /> : null}
       </View>
     </AppearOnMount>
   );
@@ -5212,7 +6628,22 @@ function readError(error: unknown) {
   return "Something went wrong.";
 }
 
+function formatDisplayDate(value?: string | null) {
+  if (!value) {
+    return "Recently";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: parsed.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+  });
+}
+
 function money(value: string | number) {
   const amount = Number(value || 0);
-  return `INR ${amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  return `₹${amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }
