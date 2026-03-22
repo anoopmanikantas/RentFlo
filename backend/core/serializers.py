@@ -9,6 +9,7 @@ from .models import (
     AddOn, Agreement, BankAccount, Building, Deposit, Offboarding, RazorpayOrder,
     Payment, Subscription, Tenancy, TenantDocument, Ticket, Unit, User, TIER_LIMITS, ADDON_CATALOG,
 )
+from .services import find_user_by_phone, normalize_phone
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -48,6 +49,15 @@ class SignupSerializer(serializers.Serializer):
             raise serializers.ValidationError("Email already registered.")
         return value
 
+    def validate_phone(self, value):
+        normalized = normalize_phone(value)
+        if not normalized:
+            return ""
+        existing = find_user_by_phone(normalized)
+        if existing:
+            raise serializers.ValidationError("Phone number already registered.")
+        return normalized
+
     def create(self, validated_data):
         password = validated_data.pop("password")
         user = User(**validated_data)
@@ -61,13 +71,29 @@ class GoogleLoginSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=User.Role.choices, required=False)
 
 
+class FirebaseLandlordAuthSerializer(serializers.Serializer):
+    id_token = serializers.CharField()
+    first_name = serializers.CharField(max_length=150, required=False, default="")
+    last_name = serializers.CharField(max_length=150, required=False, default="")
+    phone = serializers.CharField(max_length=32, required=False, default="")
+
+    def validate_phone(self, value):
+        normalized = normalize_phone(value)
+        if not normalized:
+            return ""
+        return normalized
+
+
 class AuthResponseSerializer(serializers.Serializer):
     token = serializers.CharField()
     user = UserSerializer()
 
     @staticmethod
     def from_user(user):
-        token, _ = Token.objects.get_or_create(user=user)
+        token = Token.objects.filter(user=user).order_by("created").first()
+        if not token:
+            token = Token.objects.create(user=user)
+        Token.objects.filter(user=user).exclude(key=token.key).delete()
         return {
             "token": token.key,
             "user": UserSerializer(user).data,
@@ -436,4 +462,3 @@ class CompleteHandoffSerializer(serializers.Serializer):
 
 class ConfirmMaintenanceDoneSerializer(serializers.Serializer):
     tenancy_id = serializers.IntegerField()
-

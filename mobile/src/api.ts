@@ -1,3 +1,5 @@
+import { Platform } from "react-native";
+
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:8085/api";
 
 export class ApiError extends Error {}
@@ -121,10 +123,53 @@ async function request<T>(path: string, options?: RequestInit, token?: string): 
   return body as T;
 }
 
+async function readResponseError(response: Response) {
+  const rawText = await response.text();
+  if (!rawText) {
+    return "Request failed.";
+  }
+  try {
+    const parsed = JSON.parse(rawText);
+    return parsed.detail || parsed.error || rawText;
+  } catch {
+    return rawText;
+  }
+}
+
+function readDownloadFilename(contentDisposition: string | null, fallback: string) {
+  if (!contentDisposition) {
+    return fallback;
+  }
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponent(utf8Match[1]);
+  }
+
+  const basicMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+  if (basicMatch?.[1]) {
+    return basicMatch[1];
+  }
+
+  return fallback;
+}
+
 export function login(username: string, password: string) {
   return request<AuthResponse>("/auth/login/", {
     method: "POST",
     body: JSON.stringify({ username, password }),
+  });
+}
+
+export function firebaseLandlordAuth(data: {
+  id_token: string;
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
+}) {
+  return request<AuthResponse & { is_new: boolean }>("/auth/firebase/landlord/", {
+    method: "POST",
+    body: JSON.stringify(data),
   });
 }
 
@@ -328,12 +373,42 @@ export function fetchAnalytics(token: string) {
   return request<AnalyticsData>("/landlord/analytics/", undefined, token);
 }
 
-export function exportPayments(token: string, from?: string, to?: string) {
+export type PaymentReportFormat = "excel" | "pdf";
+
+export async function exportPayments(token: string, format: PaymentReportFormat, from?: string, to?: string) {
+  if (Platform.OS !== "web" || typeof window === "undefined" || typeof document === "undefined") {
+    throw new ApiError("Payment report downloads are currently available on web.");
+  }
+
   const params = new URLSearchParams();
   if (from) params.set("from", from);
   if (to) params.set("to", to);
-  params.set("format", "json");
-  return request<Array<Record<string, unknown>>>(`/landlord/reports/export/?${params.toString()}`, undefined, token);
+  params.set("file_format", format);
+
+  const response = await fetch(`${API_BASE_URL}/landlord/reports/export/?${params.toString()}`, {
+    headers: {
+      Authorization: `Token ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new ApiError(await readResponseError(response));
+  }
+
+  const fallbackFilename = `rentflo_payments.${format === "excel" ? "xlsx" : "pdf"}`;
+  const filename = readDownloadFilename(response.headers.get("Content-Disposition"), fallbackFilename);
+  const blob = await response.blob();
+  const objectUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
+
+  return { filename, format };
 }
 
 // Premium analytics endpoints

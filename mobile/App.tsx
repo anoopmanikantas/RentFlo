@@ -1,6 +1,8 @@
 import { StatusBar } from "expo-status-bar";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+  type ComponentProps,
+  type ReactNode,
   createContext,
   startTransition,
   useCallback,
@@ -12,16 +14,21 @@ import {
 } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Appearance,
+  Easing,
+  type LayoutChangeEvent,
   Platform,
-  Pressable,
+  Pressable as RNPressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
+import { useFonts, ModernAntiqua_400Regular } from "@expo-google-fonts/modern-antiqua";
 
 import {
   ApiError,
@@ -31,6 +38,7 @@ import {
   createTenancy,
   createUnit,
   endTenancy,
+  firebaseLandlordAuth,
   fetchLandlordDashboard,
   fetchTenantDashboard,
   googleLogin,
@@ -62,6 +70,7 @@ import {
   type Plan,
   type AddOnCatalogItem,
   type AnalyticsData,
+  type PaymentReportFormat,
   // Onboarding
   fetchOnboardingStatus,
   uploadDocument,
@@ -87,7 +96,14 @@ import {
   confirmMaintenanceDone,
   type OffboardingInfo,
 } from "./src/api";
+import { getFirebaseAuth, getFirebaseConfigError, isFirebaseLandlordAuthEnabled } from "./src/firebase";
 import { launchRazorpayPayment } from "./src/razorpay";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut as signOutFirebase,
+  updateProfile,
+} from "firebase/auth";
 
 // ─── Theme system ───────────────────────────────────────────────────────────
 
@@ -190,6 +206,206 @@ function useT() {
   return useContext(ThemeContext);
 }
 
+const PRESS_ANIMATION_DURATION_MS = 250;
+const PRESS_SCALE = 0.985;
+const PRESS_OPACITY = 0.92;
+const AnimatedRNPressable = Animated.createAnimatedComponent(RNPressable);
+
+function Pressable({ style, onPressIn, onPressOut, children, ...props }: ComponentProps<typeof RNPressable>) {
+  const pressAnim = useRef(new Animated.Value(0)).current;
+  const [pressed, setPressed] = useState(false);
+
+  const animatePress = useCallback(
+    (toValue: number) => {
+      Animated.timing(pressAnim, {
+        toValue,
+        duration: PRESS_ANIMATION_DURATION_MS,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: true,
+      }).start();
+    },
+    [pressAnim],
+  );
+
+  const handlePressIn = useCallback<NonNullable<ComponentProps<typeof RNPressable>["onPressIn"]>>(
+    (event) => {
+      setPressed(true);
+      animatePress(1);
+      onPressIn?.(event);
+    },
+    [animatePress, onPressIn],
+  );
+
+  const handlePressOut = useCallback<NonNullable<ComponentProps<typeof RNPressable>["onPressOut"]>>(
+    (event) => {
+      setPressed(false);
+      animatePress(0);
+      onPressOut?.(event);
+    },
+    [animatePress, onPressOut],
+  );
+
+  const resolvedStyle = typeof style === "function" ? style({ pressed }) : style;
+  const animatedStyle = {
+    opacity: pressAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [1, PRESS_OPACITY],
+    }),
+    transform: [
+      {
+        scale: pressAnim.interpolate({
+          inputRange: [0, 1],
+          outputRange: [1, PRESS_SCALE],
+        }),
+      },
+    ],
+  };
+
+  return (
+    <AnimatedRNPressable
+      {...props}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      style={[resolvedStyle, animatedStyle]}
+    >
+      {typeof children === "function" ? children({ pressed }) : children}
+    </AnimatedRNPressable>
+  );
+}
+
+function AppearOnMount({
+  children,
+  style,
+  visible = true,
+  unmountOnExit = false,
+  onExitComplete,
+}: {
+  children: ReactNode;
+  style?: ComponentProps<typeof Animated.View>["style"];
+  visible?: boolean;
+  unmountOnExit?: boolean;
+  onExitComplete?: () => void;
+}) {
+  const appearAnim = useRef(new Animated.Value(0)).current;
+  const heightAnim = useRef(new Animated.Value(0)).current;
+  const [shouldRender, setShouldRender] = useState(visible || !unmountOnExit);
+  const [displayChildren, setDisplayChildren] = useState(children);
+  const [measuredHeight, setMeasuredHeight] = useState(0);
+
+  useEffect(() => {
+    if (visible) {
+      setDisplayChildren(children);
+    }
+  }, [children, visible]);
+
+  const handleLayout = useCallback((event: LayoutChangeEvent) => {
+    const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+    if (!nextHeight) {
+      return;
+    }
+    setMeasuredHeight((currentHeight) => (Math.abs(currentHeight - nextHeight) < 1 ? currentHeight : nextHeight));
+  }, []);
+
+  useEffect(() => {
+    if (visible && !shouldRender) {
+      appearAnim.setValue(0);
+      heightAnim.setValue(0);
+      setShouldRender(true);
+      return;
+    }
+
+    if (!shouldRender) {
+      return;
+    }
+
+    if (visible && measuredHeight === 0) {
+      return;
+    }
+
+    const animation = Animated.parallel([
+      Animated.timing(appearAnim, {
+        toValue: visible ? 1 : 0,
+        duration: PRESS_ANIMATION_DURATION_MS,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(heightAnim, {
+        toValue: visible ? measuredHeight : 0,
+        duration: PRESS_ANIMATION_DURATION_MS,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: false,
+      }),
+    ]);
+
+    animation.start(({ finished }) => {
+      if (!finished) {
+        return;
+      }
+
+      if (visible) {
+        heightAnim.setValue(measuredHeight);
+        return;
+      }
+      if (unmountOnExit) {
+        setShouldRender(false);
+      }
+      onExitComplete?.();
+    });
+
+    return () => {
+      animation.stop();
+    };
+  }, [appearAnim, heightAnim, measuredHeight, onExitComplete, shouldRender, unmountOnExit, visible]);
+
+  if (!shouldRender && unmountOnExit) {
+    return null;
+  }
+
+  return (
+    <Animated.View
+      pointerEvents={visible ? "auto" : "none"}
+      style={[
+        style,
+        {
+          height: heightAnim,
+          overflow: "hidden",
+          opacity: appearAnim,
+          transform: [
+            {
+              translateY: appearAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [10, 0],
+              }),
+            },
+            {
+              scale: appearAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0.985, 1],
+              }),
+            },
+          ],
+        },
+      ]}
+    >
+      <View onLayout={handleLayout}>
+        {displayChildren}
+      </View>
+    </Animated.View>
+  );
+}
+
+function useRetainedNullableValue<T>(value: T | null) {
+  const retainedValue = useRef<T | null>(value);
+
+  useEffect(() => {
+    if (value !== null) {
+      retainedValue.current = value;
+    }
+  }, [value]);
+
+  return value ?? retainedValue.current;
+}
+
 // ─── Dynamic styles ─────────────────────────────────────────────────────────
 
 const webTransition = Platform.select({
@@ -202,7 +418,7 @@ const webGlass = Platform.select({
   default: {},
 });
 
-function makeStyles(t: Theme) {
+function makeStyles(t: Theme, isWideWeb: boolean, isMediumWeb: boolean) {
   return StyleSheet.create({
     safeArea: {
       flex: 1,
@@ -210,23 +426,44 @@ function makeStyles(t: Theme) {
       ...webTransition,
     },
     pageOuter: {
-      alignItems: "center",
+      alignItems: isWideWeb ? "stretch" : "center",
       paddingVertical: 28,
-      paddingHorizontal: 16,
+      paddingHorizontal: isWideWeb ? 28 : 16,
     },
     pageInner: {
       width: "100%",
-      maxWidth: 520,
+      maxWidth: Platform.OS === "web" ? (isWideWeb ? 1480 : 980) : 520,
+      alignSelf: "center",
       gap: 20,
     },
-    hero: {
+    landingGrid: {
+      flexDirection: isWideWeb ? ("row" as const) : ("column" as const),
+      gap: 20,
+      alignItems: "stretch",
+    },
+    landingMain: {
+      flex: isWideWeb ? 1.35 : undefined,
+      minWidth: 0,
+    },
+    landingAside: {
+      width: isWideWeb ? 420 : "100%",
       gap: 16,
-      padding: 26,
+      flexShrink: 0,
+    },
+    hero: {
+      flexDirection: isWideWeb ? ("row" as const) : ("column" as const),
+      alignItems: isWideWeb ? ("stretch" as const) : ("flex-start" as const),
+      gap: 16,
+      padding: isWideWeb ? 32 : 26,
       borderRadius: 24,
       backgroundColor: t.cardAlt,
       borderWidth: 1,
       borderColor: t.border,
       ...webTransition,
+    },
+    heroBody: {
+      flex: 1,
+      minWidth: 0,
     },
     heroTop: {
       flexDirection: "row",
@@ -243,7 +480,8 @@ function makeStyles(t: Theme) {
     },
     title: {
       fontSize: 42,
-      fontWeight: "900",
+      fontFamily: "ModernAntiqua_400Regular",
+      fontWeight: "400",
       color: t.text,
       letterSpacing: -0.5,
     },
@@ -259,6 +497,7 @@ function makeStyles(t: Theme) {
       fontSize: 13,
     },
     roleCard: {
+      width: isWideWeb ? 320 : "100%",
       padding: 16,
       borderRadius: 20,
       backgroundColor: t.primaryMuted,
@@ -293,7 +532,7 @@ function makeStyles(t: Theme) {
       borderRadius: 22,
       borderWidth: 1,
       borderColor: t.border,
-      padding: 22,
+      padding: isWideWeb ? 24 : 22,
       gap: 16,
       ...webGlass,
       ...webTransition,
@@ -312,9 +551,13 @@ function makeStyles(t: Theme) {
       letterSpacing: -0.3,
     },
     formGrid: {
+      flexDirection: isMediumWeb ? ("row" as const) : ("column" as const),
+      flexWrap: isMediumWeb ? ("wrap" as const) : ("nowrap" as const),
+      alignItems: "stretch",
       gap: 14,
     },
     field: {
+      ...(isMediumWeb ? { flexGrow: 1, flexBasis: 280 } : {}),
       gap: 8,
     },
     fieldLabel: {
@@ -404,14 +647,29 @@ function makeStyles(t: Theme) {
     stack: {
       gap: 20,
     },
+    dashboardGrid: {
+      flexDirection: isWideWeb ? ("row" as const) : ("column" as const),
+      alignItems: "stretch",
+      gap: 20,
+    },
+    dashboardMainColumn: {
+      flex: isWideWeb ? 1.3 : undefined,
+      minWidth: 0,
+      gap: 20,
+    },
+    dashboardSideColumn: {
+      flex: isWideWeb ? 0.95 : undefined,
+      minWidth: isWideWeb ? 340 : 0,
+      gap: 20,
+    },
     summaryGrid: {
       flexDirection: "row",
       flexWrap: "wrap",
-      gap: 12,
+      gap: isWideWeb ? 16 : 12,
     },
     summaryCard: {
       flex: 1,
-      minWidth: 140,
+      minWidth: isWideWeb ? 220 : 140,
       padding: 18,
       borderRadius: 22,
       backgroundColor: t.surface,
@@ -419,6 +677,13 @@ function makeStyles(t: Theme) {
       borderColor: t.border,
       ...webGlass,
       ...webTransition,
+    },
+    summaryCardInteractive: {
+      cursor: Platform.OS === "web" ? ("pointer" as const) : undefined,
+    },
+    summaryCardActive: {
+      borderColor: t.primary,
+      backgroundColor: t.primaryMuted,
     },
     summaryLabel: {
       color: t.accent,
@@ -437,6 +702,38 @@ function makeStyles(t: Theme) {
       color: t.textSecondary,
       marginTop: 8,
       fontSize: 13,
+    },
+    summaryActionText: {
+      color: t.accent,
+      marginTop: 10,
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    detailGroupCard: {
+      padding: 18,
+      borderRadius: 18,
+      backgroundColor: t.card,
+      borderWidth: 1,
+      borderColor: t.border,
+      gap: 12,
+      ...webTransition,
+    },
+    detailGroupHeader: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 12,
+    },
+    detailGroupTitle: {
+      color: t.text,
+      fontSize: 18,
+      fontWeight: "800",
+      flex: 1,
+    },
+    detailGroupTotal: {
+      color: t.accent,
+      fontSize: 16,
+      fontWeight: "900",
     },
     tableLike: {
       gap: 12,
@@ -856,6 +1153,10 @@ export default function App() {
   // Theme
   const [isDark, setIsDark] = useState(false);
   const [themeReady, setThemeReady] = useState(false);
+  const [fontsLoaded] = useFonts({ ModernAntiqua_400Regular });
+  const { width } = useWindowDimensions();
+  const isWideWeb = Platform.OS === "web" && width >= 1180;
+  const isMediumWeb = Platform.OS === "web" && width >= 760;
 
   useEffect(() => {
     AsyncStorage.getItem("theme").then((stored) => {
@@ -870,7 +1171,7 @@ export default function App() {
   }, []);
 
   const t = isDark ? darkTheme : lightTheme;
-  const styles = useMemo(() => makeStyles(t), [isDark]);
+  const styles = useMemo(() => makeStyles(t, isWideWeb, isMediumWeb), [t, isWideWeb, isMediumWeb]);
   const toggleTheme = useCallback(() => {
     setIsDark((prev) => {
       const next = !prev;
@@ -882,7 +1183,9 @@ export default function App() {
 
   // Auth state
   const [authScreen, setAuthScreen] = useState<"login" | "signup">("login");
+  const [loginRole, setLoginRole] = useState<"landlord" | "tenant">("landlord");
   const [username, setUsername] = useState("owner");
+  const [loginEmail, setLoginEmail] = useState("owner@example.com");
   const [password, setPassword] = useState("owner123");
   const [signupUsername, setSignupUsername] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
@@ -899,8 +1202,16 @@ export default function App() {
   const [tenantData, setTenantData] = useState<TenantDashboard | null>(null);
   const [paymentForm, setPaymentForm] = useState<InitiatePaymentInput>(initialPaymentForm);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("Sign in with your account, create one, or continue with Google.");
+  const firebaseLandlordAuthEnabled = isFirebaseLandlordAuthEnabled();
+  const [message, setMessage] = useState(
+    firebaseLandlordAuthEnabled
+      ? "Landlords use Firebase email/password. Tenants can keep using RentFlo credentials or Google."
+      : "Firebase landlord auth is off. Landlords and tenants can use RentFlo credentials for now.",
+  );
   const [isInitialized, setIsInitialized] = useState(false);
+  const firebaseConfigError = getFirebaseConfigError();
+  const useFirebaseLandlordLogin = firebaseLandlordAuthEnabled && loginRole === "landlord";
+  const useFirebaseLandlordSignup = firebaseLandlordAuthEnabled && signupRole === "landlord";
 
   // Load token and user from persistent storage on app startup
   useEffect(() => {
@@ -978,7 +1289,7 @@ export default function App() {
     void load();
   }, [token, user]);
 
-  async function handleLogin() {
+  async function handleTenantLogin() {
     setBusy(true);
     setMessage("Signing in...");
     try {
@@ -995,10 +1306,60 @@ export default function App() {
     }
   }
 
+  async function handleLandlordLogin() {
+    setBusy(true);
+    setMessage("Signing landlord in with Firebase...");
+    try {
+      const configError = getFirebaseConfigError();
+      if (configError) {
+        throw new Error(`${configError} Add the EXPO_PUBLIC_FIREBASE_* variables to continue.`);
+      }
+
+      const credential = await signInWithEmailAndPassword(getFirebaseAuth(), loginEmail.trim(), password);
+      const idToken = await credential.user.getIdToken();
+      const auth = await firebaseLandlordAuth({ id_token: idToken });
+      startTransition(() => {
+        setToken(auth.token);
+        setUser(auth.user);
+      });
+      setMessage(`Signed in as ${auth.user.role}.`);
+    } catch (error) {
+      setMessage(readError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSignup() {
     setBusy(true);
-    setMessage("Creating account...");
+    setMessage(signupRole === "landlord" ? "Creating landlord account..." : "Creating account...");
     try {
+      if (useFirebaseLandlordSignup) {
+        const configError = getFirebaseConfigError();
+        if (configError) {
+          throw new Error(`${configError} Add the EXPO_PUBLIC_FIREBASE_* variables to continue.`);
+        }
+
+        const credential = await createUserWithEmailAndPassword(getFirebaseAuth(), signupEmail.trim(), signupPassword);
+        const displayName = [signupFirstName.trim(), signupLastName.trim()].filter(Boolean).join(" ");
+        if (displayName) {
+          await updateProfile(credential.user, { displayName });
+        }
+
+        const auth = await firebaseLandlordAuth({
+          id_token: await credential.user.getIdToken(true),
+          first_name: signupFirstName.trim(),
+          last_name: signupLastName.trim(),
+          phone: signupPhone.trim(),
+        });
+        startTransition(() => {
+          setToken(auth.token);
+          setUser(auth.user);
+        });
+        setMessage(`Account created! Signed in as ${auth.user.role}.`);
+        return;
+      }
+
       const data: SignupInput = {
         username: signupUsername,
         email: signupEmail,
@@ -1103,12 +1464,22 @@ export default function App() {
     }
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      if (firebaseLandlordAuthEnabled) {
+        await signOutFirebase(getFirebaseAuth());
+      }
+    } catch (error) {
+      console.error("Failed to sign out of Firebase:", error);
+    }
+
     setToken("");
     setUser(null);
     setLandlordData(null);
     setTenantData(null);
+    setLoginRole("landlord");
     setUsername("owner");
+    setLoginEmail("owner@example.com");
     setPassword("owner123");
     setSignupUsername("");
     setSignupEmail("");
@@ -1206,115 +1577,189 @@ export default function App() {
         <StatusBar style={isDark ? "light" : "dark"} />
         <ScrollView contentContainerStyle={styles.pageOuter}>
           <View style={styles.pageInner}>
-            <View style={styles.hero}>
-              <View>
-                <View style={styles.heroTop}>
-                  <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
-                  <ThemeToggle />
-                </View>
-                <Text style={styles.title}>RentFlo</Text>
-                <Text style={styles.subtitle}>
-                  One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
-                </Text>
-                <Text style={styles.note}>
-                  API base URL: {Platform.OS === "web" ? "http://localhost:8085/api" : "Set EXPO_PUBLIC_API_URL"}
-                </Text>
-              </View>
-              <View style={styles.roleCard}>
-                <Text style={styles.roleTitle}>{user ? `${user.role.toUpperCase()} SESSION` : "DEMO LOGINS"}</Text>
-                <Text style={styles.roleText}>Landlord: owner / owner123</Text>
-                <Text style={styles.roleText}>Tenant: riya / tenant123</Text>
-              </View>
-            </View>
-
-            {!user ? (
-              <View style={styles.panel}>
-                <View style={styles.authTabs}>
-                  <Pressable
-                    style={[styles.authTab, authScreen === "login" && styles.authTabActive]}
-                    onPress={() => setAuthScreen("login")}
-                  >
-                    <Text style={[styles.authTabText, authScreen === "login" && styles.authTabTextActive]}>Sign in</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.authTab, authScreen === "signup" && styles.authTabActive]}
-                    onPress={() => setAuthScreen("signup")}
-                  >
-                    <Text style={[styles.authTabText, authScreen === "signup" && styles.authTabTextActive]}>Sign up</Text>
-                  </Pressable>
-                </View>
-
-                {authScreen === "login" ? (
-                  <>
-                    <View style={styles.formGrid}>
-                      <Field label="Username" value={username} onChangeText={setUsername} />
-                      <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+            <View style={styles.landingGrid}>
+              <View style={styles.landingMain}>
+                <View style={styles.hero}>
+                  <View style={styles.heroBody}>
+                    <View style={styles.heroTop}>
+                      <Text style={styles.eyebrow}>Cross-platform rent tracking</Text>
+                      <ThemeToggle />
                     </View>
-                    <PrimaryButton label={busy ? "Signing in..." : "Login"} onPress={handleLogin} disabled={busy} fullWidth />
-                  </>
+                    <Text style={[styles.title, !fontsLoaded && { fontFamily: undefined }]}>{'RentFlo'}</Text>
+                    <Text style={styles.subtitle}>
+                      One React Native app for iOS, Android, and web, backed by Django and ready for Razorpay checkout.
+                    </Text>
+                    <Text style={styles.note}>
+                      API base URL: {Platform.OS === "web" ? "http://localhost:8085/api" : "Set EXPO_PUBLIC_API_URL"}
+                    </Text>
+                  </View>
+                  <View style={styles.roleCard}>
+                    <Text style={styles.roleTitle}>{user ? `${user.role.toUpperCase()} SESSION` : "DEMO LOGINS"}</Text>
+                    <Text style={styles.roleText}>Landlord: owner / owner123</Text>
+                    <Text style={styles.roleText}>Tenant: riya / tenant123</Text>
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.landingAside}>
+                {!user ? (
+                  <View style={styles.panel}>
+                    <View style={styles.authTabs}>
+                      <Pressable
+                        style={[styles.authTab, authScreen === "login" && styles.authTabActive]}
+                        onPress={() => setAuthScreen("login")}
+                      >
+                        <Text style={[styles.authTabText, authScreen === "login" && styles.authTabTextActive]}>Sign in</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.authTab, authScreen === "signup" && styles.authTabActive]}
+                        onPress={() => setAuthScreen("signup")}
+                      >
+                        <Text style={[styles.authTabText, authScreen === "signup" && styles.authTabTextActive]}>Sign up</Text>
+                      </Pressable>
+                    </View>
+
+                    {authScreen === "login" ? (
+                      <>
+                        <View style={styles.roleToggle}>
+                          <Text style={styles.fieldLabel}>I am signing in as</Text>
+                          <View style={styles.roleOptions}>
+                            <Pressable
+                              style={[styles.roleOption, loginRole === "landlord" && styles.roleOptionActive]}
+                              onPress={() => setLoginRole("landlord")}
+                            >
+                              <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
+                              <Text style={[styles.roleOptionText, loginRole === "landlord" && styles.roleOptionTextActive]}>
+                                Landlord
+                              </Text>
+                              <Text style={[styles.helper, loginRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                                {firebaseLandlordAuthEnabled ? "Firebase email & password" : "RentFlo username & password"}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[styles.roleOption, loginRole === "tenant" && styles.roleOptionActive]}
+                              onPress={() => setLoginRole("tenant")}
+                            >
+                              <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
+                              <Text style={[styles.roleOptionText, loginRole === "tenant" && styles.roleOptionTextActive]}>
+                                Tenant
+                              </Text>
+                              <Text style={[styles.helper, loginRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                                RentFlo username & password
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                        <View style={styles.formGrid}>
+                          {useFirebaseLandlordLogin ? (
+                            <>
+                              <Field label="Email" value={loginEmail} onChangeText={setLoginEmail} />
+                              <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                            </>
+                          ) : (
+                            <>
+                              <Field label="Username" value={username} onChangeText={setUsername} />
+                              <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                            </>
+                          )}
+                        </View>
+                        <Text style={styles.helper}>
+                          {loginRole === "landlord"
+                            ? (
+                              useFirebaseLandlordLogin
+                                ? firebaseConfigError || "We authenticate with Firebase first, then connect you to your landlord workspace."
+                                : "Firebase landlord auth is disabled. Use your RentFlo landlord username and password for now."
+                            )
+                            : "Tenants can continue using their existing RentFlo credentials."}
+                        </Text>
+                        <PrimaryButton
+                          label={busy ? "Signing in..." : `Login as ${loginRole}`}
+                          onPress={useFirebaseLandlordLogin ? handleLandlordLogin : handleTenantLogin}
+                          disabled={busy || (useFirebaseLandlordLogin && !!firebaseConfigError)}
+                          fullWidth
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <View style={styles.roleToggle}>
+                          <Text style={styles.fieldLabel}>I am a</Text>
+                          <View style={styles.roleOptions}>
+                            <Pressable
+                              style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
+                              onPress={() => setSignupRole("landlord")}
+                            >
+                              <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
+                              <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
+                                Landlord
+                              </Text>
+                              <Text style={[styles.helper, signupRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                                Manage properties & collect rent
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
+                              onPress={() => setSignupRole("tenant")}
+                            >
+                              <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
+                              <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
+                                Tenant
+                              </Text>
+                              <Text style={[styles.helper, signupRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
+                                Pay rent & track payments
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                        <View style={styles.formGrid}>
+                          {!useFirebaseLandlordSignup ? (
+                            <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
+                          ) : null}
+                          <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
+                          <Field label="Password" value={signupPassword} onChangeText={setSignupPassword} secureTextEntry />
+                          <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
+                          <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
+                          <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} keyboardType="phone-pad" />
+                        </View>
+                        <Text style={styles.helper}>
+                          {signupRole === "landlord"
+                            ? (
+                              useFirebaseLandlordSignup
+                                ? firebaseConfigError || "We will create your Firebase login and connect it to a landlord account in RentFlo."
+                                : "Firebase landlord auth is disabled. Landlord accounts will be created directly in RentFlo for now."
+                            )
+                            : "Tenant accounts are created directly in RentFlo."}
+                        </Text>
+                        <PrimaryButton
+                          label={busy ? "Creating account..." : `Create ${signupRole} account`}
+                          onPress={handleSignup}
+                          disabled={busy || (useFirebaseLandlordSignup && !!firebaseConfigError)}
+                          fullWidth
+                        />
+                      </>
+                    )}
+
+                    <View style={styles.divider}>
+                      <View style={styles.dividerLine} />
+                      <Text style={styles.dividerText}>or</Text>
+                      <View style={styles.dividerLine} />
+                    </View>
+
+                    <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" fullWidth />
+                  </View>
                 ) : (
-                  <>
-                    <View style={styles.roleToggle}>
-                      <Text style={styles.fieldLabel}>I am a</Text>
-                      <View style={styles.roleOptions}>
-                        <Pressable
-                          style={[styles.roleOption, signupRole === "landlord" && styles.roleOptionActive]}
-                          onPress={() => setSignupRole("landlord")}
-                        >
-                          <Text style={{ fontSize: 22, marginBottom: 2 }}>🏠</Text>
-                          <Text style={[styles.roleOptionText, signupRole === "landlord" && styles.roleOptionTextActive]}>
-                            Landlord
-                          </Text>
-                          <Text style={[styles.helper, signupRole === "landlord" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
-                            Manage properties & collect rent
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[styles.roleOption, signupRole === "tenant" && styles.roleOptionActive]}
-                          onPress={() => setSignupRole("tenant")}
-                        >
-                          <Text style={{ fontSize: 22, marginBottom: 2 }}>🔑</Text>
-                          <Text style={[styles.roleOptionText, signupRole === "tenant" && styles.roleOptionTextActive]}>
-                            Tenant
-                          </Text>
-                          <Text style={[styles.helper, signupRole === "tenant" && { color: "rgba(255,255,255,0.7)" }, { fontSize: 11, marginTop: 2, textAlign: "center" as const }]}>
-                            Pay rent & track payments
-                          </Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                    <View style={styles.formGrid}>
-                      <Field label="Username" value={signupUsername} onChangeText={setSignupUsername} />
-                      <Field label="Email" value={signupEmail} onChangeText={setSignupEmail} />
-                      <Field label="Password" value={signupPassword} onChangeText={setSignupPassword} secureTextEntry />
-                      <Field label="First name" value={signupFirstName} onChangeText={setSignupFirstName} />
-                      <Field label="Last name" value={signupLastName} onChangeText={setSignupLastName} />
-                      <Field label="Phone" value={signupPhone} onChangeText={setSignupPhone} />
-                    </View>
-                    <PrimaryButton label={busy ? "Creating account..." : `Create ${signupRole} account`} onPress={handleSignup} disabled={busy} fullWidth />
-                  </>
+                  <View style={styles.sessionBar}>
+                    <Text style={styles.sessionText}>
+                      Signed in as {user.first_name || user.username} ({user.role})
+                    </Text>
+                    <PrimaryButton label="Logout" onPress={logout} variant="secondary" />
+                  </View>
                 )}
 
-                <View style={styles.divider}>
-                  <View style={styles.dividerLine} />
-                  <Text style={styles.dividerText}>or</Text>
-                  <View style={styles.dividerLine} />
+                <View style={[styles.banner, busy && styles.bannerBusy]}>
+                  {busy ? <ActivityIndicator color={t.accent} /> : null}
+                  <Text style={styles.bannerText}>{message}</Text>
                 </View>
-
-                <PrimaryButton label="Continue with Google" onPress={handleGoogleLogin} disabled={busy} variant="google" fullWidth />
               </View>
-            ) : (
-              <View style={styles.sessionBar}>
-                <Text style={styles.sessionText}>
-                  Signed in as {user.first_name || user.username} ({user.role})
-                </Text>
-                <PrimaryButton label="Logout" onPress={logout} variant="secondary" />
-              </View>
-            )}
-
-            <View style={[styles.banner, busy && styles.bannerBusy]}>
-              {busy ? <ActivityIndicator color={t.accent} /> : null}
-              <Text style={styles.bannerText}>{message}</Text>
             </View>
 
             {user?.role === "landlord" && landlordData ? (
@@ -1343,7 +1788,7 @@ export default function App() {
               )
             ) : null}
 
-            {showRolePicker && user ? <RolePicker onSelect={handleRoleSelect} busy={busy} /> : null}
+            <RolePicker onSelect={handleRoleSelect} busy={busy} visible={showRolePicker && !!user} />
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -1356,10 +1801,7 @@ export default function App() {
 function ThemeToggle() {
   const { t, s, toggle } = useT();
   return (
-    <Pressable
-      onPress={toggle}
-      style={({ pressed }) => [s.themeToggle, pressed && { opacity: 0.7, transform: [{ scale: 0.92 }] }]}
-    >
+    <Pressable onPress={toggle} style={s.themeToggle}>
       <Text style={s.themeToggleIcon}>{t.mode === "dark" ? "☀️" : "🌙"}</Text>
     </Pressable>
   );
@@ -1369,12 +1811,19 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   const { t, s: styles } = useT();
   type FormType = null | "building" | "unit" | "bank" | "tenancy";
   type ScreenType = "dashboard" | "plans" | "analytics" | "delinquency" | "cashflow" | "roi" | "tenant-risk" | "maintenance" | "tax-report" | "onboarding" | "tickets" | "offboarding";
+  type SummaryDetailType = null | "due" | "outstanding";
   const [activeForm, setActiveForm] = useState<FormType>(null);
   const [screen, setScreen] = useState<ScreenType>("dashboard");
+  const [screenVisible, setScreenVisible] = useState(true);
+  const [summaryDetail, setSummaryDetail] = useState<SummaryDetailType>(null);
   const [selectedTenancyId, setSelectedTenancyId] = useState<number | null>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formMsg, setFormMsg] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
+  const [showExportOptions, setShowExportOptions] = useState(false);
+  const [exportMessage, setExportMessage] = useState("");
+  const pendingScreenTransition = useRef<null | (() => void)>(null);
+  const summaryDetailForDisplay = useRetainedNullableValue(summaryDetail);
 
   const [bName, setBName] = useState("");
   const [bAddress, setBAddress] = useState("");
@@ -1396,17 +1845,53 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
     setFormMsg("");
   }
 
-  async function handleExportPayments() {
+  const transitionScreen = useCallback(
+    (nextScreen: ScreenType, options?: { selectedTenancyId?: number | null }) => {
+      const nextTenancyId = options?.selectedTenancyId;
+      if (
+        nextScreen === screen &&
+        (nextTenancyId === undefined || nextTenancyId === selectedTenancyId)
+      ) {
+        return;
+      }
+
+      pendingScreenTransition.current = () => {
+        if (nextTenancyId !== undefined) {
+          setSelectedTenancyId(nextTenancyId);
+        }
+        setScreen(nextScreen);
+      };
+      setScreenVisible(false);
+    },
+    [screen, selectedTenancyId],
+  );
+
+  useEffect(() => {
+    if (screenVisible || !pendingScreenTransition.current) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      const applyTransition = pendingScreenTransition.current;
+      pendingScreenTransition.current = null;
+      applyTransition?.();
+      setScreenVisible(true);
+    }, PRESS_ANIMATION_DURATION_MS);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [screenVisible]);
+
+  async function handleExportPayments(format: PaymentReportFormat) {
     setExportBusy(true);
+    setExportMessage("");
     try {
-      const csv = await exportPayments(token);
-      // In a real app, this would save to device file system or share
-      // For now, just log success
-      console.log("CSV export:", csv.slice(0, 100) + "...");
-      setFormMsg("✓ Payment report exported successfully");
-      setTimeout(() => setFormMsg(""), 3000);
+      const report = await exportPayments(token, format);
+      setExportMessage(`Downloaded ${report.filename}`);
+      setShowExportOptions(false);
     } catch (e) {
-      setFormMsg(readError(e));
+      setExportMessage(readError(e));
     } finally {
       setExportBusy(false);
     }
@@ -1417,351 +1902,530 @@ function LandlordView({ data, token, onRefresh }: { data: LandlordDashboard; tok
   );
 
   const isUpgradePrompt = formMsg.includes("Upgrade");
+  const dueGroups = useMemo(() => {
+    const grouped = new Map<string, {
+      buildingName: string;
+      totalDue: number;
+      totalOutstanding: number;
+      rows: Array<{
+        id: number;
+        tenantName: string;
+        unitLabel: string;
+        monthlyRent: number;
+        paidThisMonth: number;
+        balance: number;
+      }>;
+    }>();
+
+    for (const tenant of data.tenants) {
+      const building = grouped.get(tenant.building_name) || {
+        buildingName: tenant.building_name,
+        totalDue: 0,
+        totalOutstanding: 0,
+        rows: [],
+      };
+      const monthlyRent = Number(tenant.monthly_rent || 0);
+      const paidThisMonth = Number(tenant.paid_this_month || 0);
+      const balance = Number(tenant.balance || 0);
+      building.totalDue += monthlyRent;
+      building.totalOutstanding += balance;
+      building.rows.push({
+        id: tenant.id,
+        tenantName: tenant.tenant_name,
+        unitLabel: tenant.unit_label,
+        monthlyRent,
+        paidThisMonth,
+        balance,
+      });
+      grouped.set(tenant.building_name, building);
+    }
+
+    return Array.from(grouped.values())
+      .map((group) => ({
+        ...group,
+        rows: group.rows.sort((a, b) => a.unitLabel.localeCompare(b.unitLabel) || a.tenantName.localeCompare(b.tenantName)),
+      }))
+      .sort((a, b) => a.buildingName.localeCompare(b.buildingName));
+  }, [data.tenants]);
+
+  const summaryGroups = summaryDetailForDisplay === "outstanding"
+    ? dueGroups
+        .map((group) => ({
+          ...group,
+          rows: group.rows.filter((row) => row.balance > 0),
+        }))
+        .filter((group) => group.rows.length > 0)
+    : dueGroups;
 
   if (screen === "plans") {
-    return <PlansScreen token={token} onBack={() => setScreen("dashboard")} onRefresh={onRefresh} />;
+    return <PlansScreen token={token} onBack={() => transitionScreen("dashboard")} onRefresh={onRefresh} visible={screenVisible} />;
   }
   if (screen === "analytics") {
-    return <AnalyticsScreen token={token} onBack={() => setScreen("dashboard")} onNavigate={(s: any) => setScreen(s)} />;
+    return <AnalyticsScreen token={token} onBack={() => transitionScreen("dashboard")} onNavigate={(s: any) => transitionScreen(s)} visible={screenVisible} />;
   }
   if (screen === "delinquency") {
-    return <DelinquencyAnalyticsScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <DelinquencyAnalyticsScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "cashflow") {
-    return <CashFlowForecastScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <CashFlowForecastScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "roi") {
-    return <PropertyROIScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <PropertyROIScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "tenant-risk") {
-    return <TenantRiskScoringScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <TenantRiskScoringScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "maintenance") {
-    return <MaintenanceIntelligenceScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <MaintenanceIntelligenceScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "tax-report") {
-    return <TaxComplianceReportScreen token={token} onBack={() => setScreen("analytics")} />;
+    return <TaxComplianceReportScreen token={token} onBack={() => transitionScreen("analytics")} visible={screenVisible} />;
   }
   if (screen === "onboarding" && selectedTenancyId) {
-    return <OnboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => { setScreen("dashboard"); setSelectedTenancyId(null); }} onRefresh={onRefresh} />;
+    return <OnboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => transitionScreen("dashboard", { selectedTenancyId: null })} onRefresh={onRefresh} visible={screenVisible} />;
   }
   if (screen === "tickets") {
-    return <TicketsScreen token={token} isLandlord={true} onBack={() => setScreen("dashboard")} />;
+    return <TicketsScreen token={token} isLandlord={true} onBack={() => transitionScreen("dashboard")} visible={screenVisible} />;
   }
   if (screen === "offboarding" && selectedTenancyId) {
-    return <OffboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => { setScreen("dashboard"); setSelectedTenancyId(null); }} onRefresh={onRefresh} />;
+    return <OffboardingScreen token={token} tenancyId={selectedTenancyId} isLandlord={true} onBack={() => transitionScreen("dashboard", { selectedTenancyId: null })} onRefresh={onRefresh} visible={screenVisible} />;
   }
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={screenVisible}>
+      <View style={styles.stack}>
       {/* Navigation chips */}
       <View style={styles.navChips}>
         <ActionChip icon="📊" label="Dashboard" active={true} onPress={() => {}} />
-        <ActionChip icon="💎" label="Plans" active={false} onPress={() => setScreen("plans")} />
-        <ActionChip icon="📈" label="Analytics" active={false} onPress={() => setScreen("analytics")} />
-        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => setScreen("tickets")} />
+        <ActionChip icon="💎" label="Plans" active={false} onPress={() => transitionScreen("plans")} />
+        <ActionChip icon="📈" label="Analytics" active={false} onPress={() => transitionScreen("analytics")} />
+        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => transitionScreen("tickets")} />
       </View>
-
-      {/* Subscription tier badge + usage */}
-      {sub && (
-        <View style={[styles.panel, { gap: 12 }]}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            <View style={styles.tierBadge}>
-              <Text style={styles.tierBadgeText}>{sub.tier} plan</Text>
-            </View>
-            {sub.tier === "free" && (
-              <Pressable onPress={() => setScreen("plans")}>
-                <Text style={{ color: t.accent, fontWeight: "700", fontSize: 13 }}>Upgrade →</Text>
-              </Pressable>
-            )}
-          </View>
-          <View style={{ gap: 6 }}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-              <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Units</Text>
-              <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.units_used}/{sub.max_units >= 9999 ? "∞" : sub.max_units}</Text>
-            </View>
-            <View style={styles.usageBar}>
-              <View style={[styles.usageBarFill, { width: `${Math.min((sub.units_used / (sub.max_units >= 9999 ? 100 : sub.max_units)) * 100, 100)}%` }]} />
-            </View>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
-              <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Tenants</Text>
-              <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.tenants_used}/{sub.max_tenants >= 9999 ? "∞" : sub.max_tenants}</Text>
-            </View>
-            <View style={styles.usageBar}>
-              <View style={[styles.usageBarFill, { width: `${Math.min((sub.tenants_used / (sub.max_tenants >= 9999 ? 100 : sub.max_tenants)) * 100, 100)}%` }]} />
-            </View>
-          </View>
-        </View>
-      )}
 
       <View style={styles.summaryGrid}>
         <SummaryCard label="Buildings" value={String(data.summary.building_count)} note={`${data.summary.unit_count} units`} />
         <SummaryCard label="Tenants" value={String(data.summary.tenant_count)} note="Active occupancies" />
-        <SummaryCard label="Due" value={money(data.summary.monthly_due)} note={`For ${data.current_month}`} />
-        <SummaryCard label="Outstanding" value={money(data.summary.monthly_outstanding)} note={`${money(data.summary.monthly_collected)} collected`} />
+        <SummaryCard
+          label="Due"
+          value={money(data.summary.monthly_due)}
+          note={`For ${data.current_month}`}
+          actionText="Tap for rent roll"
+          active={summaryDetail === "due"}
+          onPress={() => setSummaryDetail((current) => (current === "due" ? null : "due"))}
+        />
+        <SummaryCard
+          label="Outstanding"
+          value={money(data.summary.monthly_outstanding)}
+          note={`${money(data.summary.monthly_collected)} collected`}
+          actionText="Tap for due details"
+          active={summaryDetail === "outstanding"}
+          onPress={() => setSummaryDetail((current) => (current === "outstanding" ? null : "outstanding"))}
+        />
       </View>
 
-      {/* Quick actions bar */}
-      <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>Manage</Text>
-        <Text style={styles.panelTitle}>Quick actions</Text>
-        {formMsg ? (
-          <View style={[styles.banner, { marginBottom: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
-            <Text style={[styles.bannerText, { flex: 1 }]}>{formMsg}</Text>
-            {isUpgradePrompt && (
-              <Pressable
-                style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: t.accent, borderRadius: 4 }}
-                onPress={() => setScreen("plans")}
-              >
-                <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>View Plans</Text>
-              </Pressable>
-            )}
+      <AppearOnMount visible={Boolean(summaryDetail)} unmountOnExit>
+        {summaryDetailForDisplay ? (
+          <View style={styles.panel}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.sectionKicker}>
+                {summaryDetailForDisplay === "due" ? "Rent Roll" : "Outstanding Dues"}
+              </Text>
+              <Text style={styles.panelTitle}>
+                {summaryDetailForDisplay === "due" ? `Due for ${data.current_month}` : "Amount yet to be received"}
+              </Text>
+              <Text style={styles.helper}>
+                {summaryDetailForDisplay === "due"
+                  ? "Grouped by building with each unit, tenant, total due, amount collected, and remaining balance."
+                  : "Grouped by building with only tenants who still have an unpaid balance this month."}
+              </Text>
+            </View>
+            <PrimaryButton label="Close" onPress={() => setSummaryDetail(null)} variant="secondary" />
           </View>
-        ) : null}
 
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
-          <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
-          <ActionChip icon="🏦" label="Bank account" active={activeForm === "bank"} onPress={() => openForm("bank")} />
-          <ActionChip icon="👤" label="Assign tenant" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} />
-        </View>
-
-        {/* Building form */}
-        {activeForm === "building" && (
-          <View style={styles.inlineForm}>
-            <Text style={styles.inlineFormTitle}>New building</Text>
-            <Field label="Name" value={bName} onChangeText={setBName} />
-            <AddressSearch value={bAddress} onSelect={setBAddress} />
-            <PrimaryButton
-              label={formBusy ? "Creating..." : "Create building"}
-              disabled={formBusy || !bName.trim()}
-              onPress={async () => {
-                setFormBusy(true);
-                try {
-                  await createBuilding(token, { name: bName, address: bAddress });
-                  setFormMsg(`✓ Building "${bName}" created`);
-                  setBName(""); setBAddress(""); setActiveForm(null);
-                  onRefresh();
-                } catch (e) { setFormMsg(readError(e)); }
-                setFormBusy(false);
-              }}
-            />
-          </View>
-        )}
-
-        {/* Unit form */}
-        {activeForm === "unit" && (
-          <View style={styles.inlineForm}>
-            <Text style={styles.inlineFormTitle}>New unit</Text>
-            <Text style={styles.fieldLabel}>Select building</Text>
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-              {data.buildings.map((b) => (
-                <Pressable
-                  key={b.id}
-                  style={[styles.selectChip, selectedBuildingId === b.id && styles.selectChipActive]}
-                  onPress={() => setSelectedBuildingId(b.id)}
-                >
-                  <Text style={[styles.selectChipText, selectedBuildingId === b.id && styles.selectChipTextActive]}>
-                    {b.name}
-                  </Text>
-                </Pressable>
+          {summaryGroups.length === 0 ? (
+            <Text style={styles.helper}>No outstanding balances right now.</Text>
+          ) : (
+            <View style={styles.stack}>
+              {summaryGroups.map((group) => (
+                <View key={group.buildingName} style={styles.detailGroupCard}>
+                  <View style={styles.detailGroupHeader}>
+                    <Text style={styles.detailGroupTitle}>{group.buildingName}</Text>
+                    <Text style={styles.detailGroupTotal}>
+                      {money(summaryDetailForDisplay === "due" ? group.totalDue : group.totalOutstanding)}
+                    </Text>
+                  </View>
+                  <View style={styles.tableLike}>
+                    {group.rows.map((row) => (
+                      <View key={row.id} style={styles.tableRow}>
+                        <View style={styles.tableMain}>
+                          <Text style={styles.rowTitle}>{row.unitLabel}</Text>
+                          <Text style={styles.rowMeta}>{row.tenantName}</Text>
+                        </View>
+                        <View style={styles.tableNumbers}>
+                          <Text style={styles.rowValue}>
+                            {money(summaryDetailForDisplay === "due" ? row.monthlyRent : row.balance)}
+                          </Text>
+                          <Text style={styles.rowMeta}>
+                            {summaryDetailForDisplay === "due"
+                              ? `Paid ${money(row.paidThisMonth)} • Balance ${money(row.balance)}`
+                              : `Rent ${money(row.monthlyRent)} • Paid ${money(row.paidThisMonth)}`}
+                          </Text>
+                        </View>
+                        <StatusBadge status={row.balance > 0 ? (row.paidThisMonth > 0 ? "part_paid" : "not_paid") : "paid"} />
+                      </View>
+                    ))}
+                  </View>
+                </View>
               ))}
             </View>
-            <Field label="Unit label (e.g. 2B, Ground Floor)" value={uLabel} onChangeText={setULabel} />
-            <Field label="Monthly rent (₹)" value={uRent} onChangeText={setURent} keyboardType="numeric" />
-            <PrimaryButton
-              label={formBusy ? "Creating..." : "Create unit"}
-              disabled={formBusy || !selectedBuildingId || !uLabel.trim() || !uRent.trim()}
-              onPress={async () => {
-                setFormBusy(true);
-                try {
-                  await createUnit(token, { building_id: selectedBuildingId!, label: uLabel, monthly_rent: uRent });
-                  setFormMsg(`✓ Unit "${uLabel}" created`);
-                  setSelectedBuildingId(null); setULabel(""); setURent(""); setActiveForm(null);
-                  onRefresh();
-                } catch (e) {
-                  const err = readError(e);
-                  if (err.includes("Upgrade")) {
-                    setFormMsg(err);
-                  } else {
-                    setFormMsg(err);
-                  }
-                }
-                setFormBusy(false);
-              }}
-            />
+          )}
           </View>
-        )}
+        ) : null}
+      </AppearOnMount>
 
-        {/* Bank account form */}
-        {activeForm === "bank" && (
-          <View style={styles.inlineForm}>
-            <Text style={styles.inlineFormTitle}>New bank account</Text>
-            <Field label="Bank name" value={bankName} onChangeText={setBankName} />
-            <Field label="Account holder name" value={accName} onChangeText={setAccName} />
-            <Field label="Account number" value={accNumber} onChangeText={setAccNumber} keyboardType="numeric" />
-            <Field label="IFSC code (optional)" value={ifsc} onChangeText={setIfsc} />
-            <PrimaryButton
-              label={formBusy ? "Creating..." : "Add bank account"}
-              disabled={formBusy || !bankName.trim() || !accNumber.trim()}
-              onPress={async () => {
-                setFormBusy(true);
-                try {
-                  await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
-                  setFormMsg(`✓ Bank account added`);
-                  setBankName(""); setAccName(""); setAccNumber(""); setIfsc(""); setActiveForm(null);
-                  onRefresh();
-                } catch (e) { setFormMsg(readError(e)); }
-                setFormBusy(false);
-              }}
-            />
-          </View>
-        )}
-
-        {/* Assign tenant */}
-        {activeForm === "tenancy" && (
-          <View style={styles.inlineForm}>
-            <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
-            <Text style={styles.helper}>Enter the tenant's code (e.g. RF-A3K9) or email address.</Text>
-            <Field label="Tenant code or email" value={tenantIdentifier} onChangeText={setTenantIdentifier} />
-            <Text style={styles.fieldLabel}>Select vacant unit</Text>
-            <View style={{ gap: 6 }}>
-              {unoccupiedUnits.length === 0 ? (
-                <View style={{ gap: 10 }}>
-                  <Text style={styles.helper}>All {data.units.length} units are currently occupied.</Text>
-                  <PrimaryButton
-                    label="+ Create a new unit first"
-                    variant="secondary"
-                    onPress={() => { setActiveForm("unit"); setFormMsg(""); }}
-                  />
-                </View>
-              ) : (
-                unoccupiedUnits.map((u) => (
+      <View style={styles.dashboardGrid}>
+        <View style={styles.dashboardMainColumn}>
+          {/* Quick actions bar */}
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Manage</Text>
+            <Text style={styles.panelTitle}>Quick actions</Text>
+            {formMsg ? (
+              <View style={[styles.banner, { marginBottom: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
+                <Text style={[styles.bannerText, { flex: 1 }]}>{formMsg}</Text>
+                {isUpgradePrompt && (
                   <Pressable
-                    key={u.id}
-                    style={[styles.selectChip, selectedUnitId === u.id && styles.selectChipActive, { paddingVertical: 10 }]}
-                    onPress={() => setSelectedUnitId(u.id)}
+                    style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: t.accent, borderRadius: 4 }}
+                    onPress={() => transitionScreen("plans")}
                   >
-                    <Text style={[styles.selectChipText, selectedUnitId === u.id && styles.selectChipTextActive]}>
-                      {u.building_name} / {u.label} — {money(u.monthly_rent)}/mo
-                    </Text>
+                    <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>View Plans</Text>
                   </Pressable>
-                ))
-              )}
+                )}
+              </View>
+            ) : null}
+
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <ActionChip icon="🏢" label="Building" active={activeForm === "building"} onPress={() => openForm("building")} />
+              <ActionChip icon="🚪" label="Unit" active={activeForm === "unit"} onPress={() => openForm("unit")} disabled={data.buildings.length === 0} />
+              <ActionChip icon="🏦" label="Bank account" active={activeForm === "bank"} onPress={() => openForm("bank")} />
+              <ActionChip icon="👤" label="Assign tenant" active={activeForm === "tenancy"} onPress={() => openForm("tenancy")} />
             </View>
-            {unoccupiedUnits.length > 0 && (
-              <PrimaryButton
-                label={formBusy ? "Assigning..." : "Assign tenant"}
-                disabled={formBusy || !tenantIdentifier.trim() || !selectedUnitId}
-                onPress={async () => {
-                  setFormBusy(true);
-                  try {
-                    await createTenancy(token, { tenant_identifier: tenantIdentifier, unit_id: selectedUnitId! });
-                    setFormMsg(`✓ Tenant assigned successfully`);
-                    setTenantIdentifier(""); setSelectedUnitId(null); setActiveForm(null);
-                    onRefresh();
-                  } catch (e) {
-                    const err = readError(e);
-                    if (err.includes("Upgrade")) {
-                      setFormMsg(err);
-                    } else {
-                      setFormMsg(err);
+
+            <AppearOnMount visible={activeForm === "building"} unmountOnExit>
+              {activeForm === "building" ? (
+                <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>New building</Text>
+                <Field label="Name" value={bName} onChangeText={setBName} />
+                <AddressSearch value={bAddress} onSelect={setBAddress} />
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Create building"}
+                  disabled={formBusy || !bName.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createBuilding(token, { name: bName, address: bAddress });
+                      setFormMsg(`✓ Building "${bName}" created`);
+                      setBName(""); setBAddress(""); setActiveForm(null);
+                      onRefresh();
+                    } catch (e) { setFormMsg(readError(e)); }
+                    setFormBusy(false);
+                  }}
+                />
+                </View>
+              ) : null}
+            </AppearOnMount>
+
+            <AppearOnMount visible={activeForm === "unit"} unmountOnExit>
+              {activeForm === "unit" ? (
+                <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>New unit</Text>
+                <Text style={styles.fieldLabel}>Select building</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {data.buildings.map((b) => (
+                    <Pressable
+                      key={b.id}
+                      style={[styles.selectChip, selectedBuildingId === b.id && styles.selectChipActive]}
+                      onPress={() => setSelectedBuildingId(b.id)}
+                    >
+                      <Text style={[styles.selectChipText, selectedBuildingId === b.id && styles.selectChipTextActive]}>
+                        {b.name}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Field label="Unit label (e.g. 2B, Ground Floor)" value={uLabel} onChangeText={setULabel} />
+                <Field label="Monthly rent (₹)" value={uRent} onChangeText={setURent} keyboardType="numeric" />
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Create unit"}
+                  disabled={formBusy || !selectedBuildingId || !uLabel.trim() || !uRent.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createUnit(token, { building_id: selectedBuildingId!, label: uLabel, monthly_rent: uRent });
+                      setFormMsg(`✓ Unit "${uLabel}" created`);
+                      setSelectedBuildingId(null); setULabel(""); setURent(""); setActiveForm(null);
+                      onRefresh();
+                    } catch (e) {
+                      const err = readError(e);
+                      if (err.includes("Upgrade")) {
+                        setFormMsg(err);
+                      } else {
+                        setFormMsg(err);
+                      }
                     }
-                  }
-                  setFormBusy(false);
-                }}
-              />
+                    setFormBusy(false);
+                  }}
+                />
+                </View>
+              ) : null}
+            </AppearOnMount>
+
+            <AppearOnMount visible={activeForm === "bank"} unmountOnExit>
+              {activeForm === "bank" ? (
+                <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>New bank account</Text>
+                <Field label="Bank name" value={bankName} onChangeText={setBankName} />
+                <Field label="Account holder name" value={accName} onChangeText={setAccName} />
+                <Field label="Account number" value={accNumber} onChangeText={setAccNumber} keyboardType="numeric" />
+                <Field label="IFSC code (optional)" value={ifsc} onChangeText={setIfsc} />
+                <PrimaryButton
+                  label={formBusy ? "Creating..." : "Add bank account"}
+                  disabled={formBusy || !bankName.trim() || !accNumber.trim()}
+                  onPress={async () => {
+                    setFormBusy(true);
+                    try {
+                      await createBankAccount(token, { bank_name: bankName, account_name: accName, account_number: accNumber, ifsc });
+                      setFormMsg(`✓ Bank account added`);
+                      setBankName(""); setAccName(""); setAccNumber(""); setIfsc(""); setActiveForm(null);
+                      onRefresh();
+                    } catch (e) { setFormMsg(readError(e)); }
+                    setFormBusy(false);
+                  }}
+                />
+                </View>
+              ) : null}
+            </AppearOnMount>
+
+            <AppearOnMount visible={activeForm === "tenancy"} unmountOnExit>
+              {activeForm === "tenancy" ? (
+                <View style={styles.inlineForm}>
+                <Text style={styles.inlineFormTitle}>Assign tenant to unit</Text>
+                <Text style={styles.helper}>Enter the tenant's code (e.g. RF-A3K9) or email address.</Text>
+                <Field label="Tenant code or email" value={tenantIdentifier} onChangeText={setTenantIdentifier} />
+                <Text style={styles.fieldLabel}>Select vacant unit</Text>
+                <View style={{ gap: 6 }}>
+                  {unoccupiedUnits.length === 0 ? (
+                    <View style={{ gap: 10 }}>
+                      <Text style={styles.helper}>All {data.units.length} units are currently occupied.</Text>
+                      <PrimaryButton
+                        label="+ Create a new unit first"
+                        variant="secondary"
+                        onPress={() => { setActiveForm("unit"); setFormMsg(""); }}
+                      />
+                    </View>
+                  ) : (
+                    unoccupiedUnits.map((u) => (
+                      <Pressable
+                        key={u.id}
+                        style={[styles.selectChip, selectedUnitId === u.id && styles.selectChipActive, { paddingVertical: 10 }]}
+                        onPress={() => setSelectedUnitId(u.id)}
+                      >
+                        <Text style={[styles.selectChipText, selectedUnitId === u.id && styles.selectChipTextActive]}>
+                          {u.building_name} / {u.label} — {money(u.monthly_rent)}/mo
+                        </Text>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+                {unoccupiedUnits.length > 0 && (
+                  <PrimaryButton
+                    label={formBusy ? "Assigning..." : "Assign tenant"}
+                    disabled={formBusy || !tenantIdentifier.trim() || !selectedUnitId}
+                    onPress={async () => {
+                      setFormBusy(true);
+                      try {
+                        await createTenancy(token, { tenant_identifier: tenantIdentifier, unit_id: selectedUnitId! });
+                        setFormMsg(`✓ Tenant assigned successfully`);
+                        setTenantIdentifier(""); setSelectedUnitId(null); setActiveForm(null);
+                        onRefresh();
+                      } catch (e) {
+                        const err = readError(e);
+                        if (err.includes("Upgrade")) {
+                          setFormMsg(err);
+                        } else {
+                          setFormMsg(err);
+                        }
+                      }
+                      setFormBusy(false);
+                    }}
+                  />
+                )}
+                </View>
+              ) : null}
+            </AppearOnMount>
+          </View>
+
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Owner View</Text>
+            <Text style={styles.panelTitle}>Tenant payment status</Text>
+            {data.tenants.length === 0 ? (
+              <Text style={styles.helper}>No tenants yet. Add a building, a unit, and assign a tenant above.</Text>
+            ) : (
+              <View style={styles.tableLike}>
+                {data.tenants.map((tenant) => (
+                  <View key={tenant.id} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
+                      <Text style={styles.rowMeta}>
+                        {tenant.building_name} / {tenant.unit_label} • <Text style={{ fontWeight: "700", color: t.accent }}>{tenant.tenant_code}</Text>
+                      </Text>
+                    </View>
+                    <View style={styles.tableNumbers}>
+                      <Text style={styles.rowValue}>{money(tenant.paid_this_month)}</Text>
+                      <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
+                    </View>
+                    <StatusBadge status={tenant.status} />
+                    <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap" }}>
+                      <Pressable
+                        style={[styles.removeButton, { backgroundColor: t.primaryMuted }]}
+                        onPress={() => transitionScreen("onboarding", { selectedTenancyId: tenant.id })}
+                      >
+                        <Text style={[styles.removeButtonText, { color: t.primary }]}>Onboard</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.removeButton, { backgroundColor: "rgba(163,95,0,0.10)" }]}
+                        onPress={() => transitionScreen("offboarding", { selectedTenancyId: tenant.id })}
+                      >
+                        <Text style={[styles.removeButtonText, { color: "#a35f00" }]}>Offboard</Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.removeButton}
+                        onPress={async () => {
+                          try {
+                            await endTenancy(token, tenant.id);
+                            onRefresh();
+                          } catch (e) { /* ignore */ }
+                        }}
+                      >
+                        <Text style={styles.removeButtonText}>Remove</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </View>
             )}
           </View>
-        )}
-      </View>
-
-      <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>Owner View</Text>
-        <Text style={styles.panelTitle}>Tenant payment status</Text>
-        {data.tenants.length === 0 ? (
-          <Text style={styles.helper}>No tenants yet. Add a building, a unit, and assign a tenant above.</Text>
-        ) : (
-          <View style={styles.tableLike}>
-            {data.tenants.map((tenant) => (
-              <View key={tenant.id} style={styles.tableRow}>
-                <View style={styles.tableMain}>
-                  <Text style={styles.rowTitle}>{tenant.tenant_name}</Text>
-                  <Text style={styles.rowMeta}>
-                    {tenant.building_name} / {tenant.unit_label} • <Text style={{ fontWeight: "700", color: t.accent }}>{tenant.tenant_code}</Text>
-                  </Text>
-                </View>
-                <View style={styles.tableNumbers}>
-                  <Text style={styles.rowValue}>{money(tenant.paid_this_month)}</Text>
-                  <Text style={styles.rowMeta}>Balance {money(tenant.balance)}</Text>
-                </View>
-                <StatusBadge status={tenant.status} />
-                <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap" }}>
-                  <Pressable
-                    style={[styles.removeButton, { backgroundColor: t.primaryMuted }]}
-                    onPress={() => { setSelectedTenancyId(tenant.id); setScreen("onboarding"); }}
-                  >
-                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Onboard</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.removeButton, { backgroundColor: "rgba(163,95,0,0.10)" }]}
-                    onPress={() => { setSelectedTenancyId(tenant.id); setScreen("offboarding"); }}
-                  >
-                    <Text style={[styles.removeButtonText, { color: "#a35f00" }]}>Offboard</Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.removeButton}
-                    onPress={async () => {
-                      try {
-                        await endTenancy(token, tenant.id);
-                        onRefresh();
-                      } catch (e) { /* ignore */ }
-                    }}
-                  >
-                    <Text style={styles.removeButtonText}>Remove</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-      </View>
-
-      <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>Ledger</Text>
-        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <Text style={styles.panelTitle}>Recent payments</Text>
-          {sub?.has_reports && (
-            <Pressable
-              style={{ padding: 8, backgroundColor: t.accent, borderRadius: 4 }}
-              onPress={handleExportPayments}
-              disabled={exportBusy}
-            >
-              <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>
-                {exportBusy ? "Exporting..." : "📥 Export"}
-              </Text>
-            </Pressable>
-          )}
         </View>
-        <View style={styles.tableLike}>
-          {data.payments.map((payment) => (
-            <View key={payment.id} style={styles.tableRow}>
-              <View style={styles.tableMain}>
-                <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
-                <Text style={styles.rowMeta}>
-                  {payment.building_name} / {payment.unit_label} • {payment.rent_month}
-                </Text>
+
+        <View style={styles.dashboardSideColumn}>
+          {sub && (
+            <View style={[styles.panel, { gap: 12 }]}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <View style={styles.tierBadge}>
+                  <Text style={styles.tierBadgeText}>{sub.tier} plan</Text>
+                </View>
+                {sub.tier === "free" && (
+                  <Pressable onPress={() => transitionScreen("plans")}>
+                    <Text style={{ color: t.accent, fontWeight: "700", fontSize: 13 }}>Upgrade →</Text>
+                  </Pressable>
+                )}
               </View>
-              <View style={styles.tableNumbers}>
-                <Text style={styles.rowValue}>{money(payment.amount)}</Text>
-                <Text style={styles.rowMeta}>{payment.bank_name}</Text>
+              <View style={{ gap: 6 }}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                  <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Units</Text>
+                  <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.units_used}/{sub.max_units >= 9999 ? "∞" : sub.max_units}</Text>
+                </View>
+                <View style={styles.usageBar}>
+                  <View style={[styles.usageBarFill, { width: `${Math.min((sub.units_used / (sub.max_units >= 9999 ? 100 : sub.max_units)) * 100, 100)}%` }]} />
+                </View>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
+                  <Text style={{ fontSize: 13, color: t.textSecondary, fontWeight: "600" }}>Tenants</Text>
+                  <Text style={{ fontSize: 13, color: t.text, fontWeight: "700" }}>{sub.tenants_used}/{sub.max_tenants >= 9999 ? "∞" : sub.max_tenants}</Text>
+                </View>
+                <View style={styles.usageBar}>
+                  <View style={[styles.usageBarFill, { width: `${Math.min((sub.tenants_used / (sub.max_tenants >= 9999 ? 100 : sub.max_tenants)) * 100, 100)}%` }]} />
+                </View>
               </View>
-              <StatusBadge status={payment.status} />
             </View>
-          ))}
+          )}
+
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Ledger</Text>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <Text style={styles.panelTitle}>Recent payments</Text>
+              {sub?.has_reports && (
+                <Pressable
+                  style={{ padding: 8, backgroundColor: t.accent, borderRadius: 4 }}
+                  onPress={() => {
+                    setShowExportOptions((current) => !current);
+                    setExportMessage("");
+                  }}
+                  disabled={exportBusy}
+                >
+                  <Text style={{ color: t.bg, fontWeight: "700", fontSize: 12 }}>
+                    {exportBusy ? "Exporting..." : showExportOptions ? "Close" : "📥 Export"}
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+            {exportMessage ? (
+              <Text
+                style={[
+                  styles.helper,
+                  {
+                    marginBottom: 12,
+                    color: exportMessage.startsWith("Downloaded") ? t.successText : t.dangerText,
+                  },
+                ]}
+              >
+                {exportMessage}
+              </Text>
+            ) : null}
+            <AppearOnMount visible={showExportOptions} unmountOnExit>
+              {showExportOptions ? (
+                <View style={[styles.banner, { marginBottom: 12 }]}>
+                  <Text style={styles.bannerText}>Choose the export format for your payment report.</Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                    <ActionChip
+                      icon="📊"
+                      label={exportBusy ? "Exporting..." : "Excel (.xlsx)"}
+                      active={false}
+                      onPress={() => handleExportPayments("excel")}
+                      disabled={exportBusy}
+                    />
+                    <ActionChip
+                      icon="📄"
+                      label={exportBusy ? "Exporting..." : "PDF"}
+                      active={false}
+                      onPress={() => handleExportPayments("pdf")}
+                      disabled={exportBusy}
+                    />
+                  </View>
+                </View>
+              ) : null}
+            </AppearOnMount>
+            <View style={styles.tableLike}>
+              {data.payments.map((payment) => (
+                <View key={payment.id} style={styles.tableRow}>
+                  <View style={styles.tableMain}>
+                    <Text style={styles.rowTitle}>{payment.tenant_name}</Text>
+                    <Text style={styles.rowMeta}>
+                      {payment.building_name} / {payment.unit_label} • {payment.rent_month}
+                    </Text>
+                  </View>
+                  <View style={styles.tableNumbers}>
+                    <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                    <Text style={styles.rowMeta}>{payment.bank_name}</Text>
+                  </View>
+                  <StatusBadge status={payment.status} />
+                </View>
+              ))}
+            </View>
+          </View>
         </View>
       </View>
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -1784,20 +2448,50 @@ function TenantView({
 }) {
   const { t, s: styles } = useT();
   const [tenantScreen, setTenantScreen] = useState<"dashboard" | "onboarding" | "tickets">("dashboard");
+  const [tenantScreenVisible, setTenantScreenVisible] = useState(true);
+  const pendingTenantScreenTransition = useRef<null | (() => void)>(null);
+
+  const transitionTenantScreen = useCallback((nextScreen: "dashboard" | "onboarding" | "tickets") => {
+    if (nextScreen === tenantScreen) {
+      return;
+    }
+    pendingTenantScreenTransition.current = () => {
+      setTenantScreen(nextScreen);
+    };
+    setTenantScreenVisible(false);
+  }, [tenantScreen]);
+
+  useEffect(() => {
+    if (tenantScreenVisible || !pendingTenantScreenTransition.current) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      const applyTransition = pendingTenantScreenTransition.current;
+      pendingTenantScreenTransition.current = null;
+      applyTransition?.();
+      setTenantScreenVisible(true);
+    }, PRESS_ANIMATION_DURATION_MS);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [tenantScreenVisible]);
 
   if (tenantScreen === "onboarding") {
-    return <OnboardingScreen token={token} tenancyId={data.tenancy.id} isLandlord={false} onBack={() => setTenantScreen("dashboard")} onRefresh={() => {}} />;
+    return <OnboardingScreen token={token} tenancyId={data.tenancy.id} isLandlord={false} onBack={() => transitionTenantScreen("dashboard")} onRefresh={() => {}} visible={tenantScreenVisible} />;
   }
   if (tenantScreen === "tickets") {
-    return <TicketsScreen token={token} isLandlord={false} onBack={() => setTenantScreen("dashboard")} />;
+    return <TicketsScreen token={token} isLandlord={false} onBack={() => transitionTenantScreen("dashboard")} visible={tenantScreenVisible} />;
   }
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={tenantScreenVisible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
-        <ActionChip icon="🏠" label="Dashboard" active={tenantScreen === "dashboard"} onPress={() => setTenantScreen("dashboard")} />
-        <ActionChip icon="📋" label="Onboarding" active={false} onPress={() => setTenantScreen("onboarding")} />
-        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => setTenantScreen("tickets")} />
+        <ActionChip icon="🏠" label="Dashboard" active={tenantScreen === "dashboard"} onPress={() => {}} />
+        <ActionChip icon="📋" label="Onboarding" active={false} onPress={() => transitionTenantScreen("onboarding")} />
+        <ActionChip icon="🎫" label="Tickets" active={false} onPress={() => transitionTenantScreen("tickets")} />
       </View>
       <View style={styles.summaryGrid}>
         <SummaryCard label="Your code" value={user.tenant_code || "—"} note="Share with landlord" />
@@ -1807,60 +2501,67 @@ function TenantView({
         <SummaryCard label="Balance" value={money(data.current_month_balance)} note="Remaining" />
       </View>
 
-      <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>Razorpay</Text>
-        <Text style={styles.panelTitle}>Pay rent inside the app</Text>
-        <View style={styles.formGrid}>
-          <Field
-            label="Rent month"
-            value={paymentForm.rent_month}
-            onChangeText={(rent_month) => setPaymentForm({ ...paymentForm, rent_month })}
-          />
-          <Field
-            label="Amount"
-            value={String(paymentForm.amount)}
-            onChangeText={(amount) => setPaymentForm({ ...paymentForm, amount })}
-            keyboardType="numeric"
-          />
-          <Field
-            label="Bank account id"
-            value={String(paymentForm.bank_account_id)}
-            onChangeText={(bank_account_id) => setPaymentForm({ ...paymentForm, bank_account_id: Number(bank_account_id) || 0 })}
-            keyboardType="numeric"
-          />
-        </View>
-        <Text style={styles.helper}>
-          Available accounts: {data.bank_accounts.map((account) => `${account.id}: ${account.bank_name}`).join(" • ")}
-        </Text>
-        <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} fullWidth />
-      </View>
-
-      <View style={styles.panel}>
-        <Text style={styles.sectionKicker}>History</Text>
-        <Text style={styles.panelTitle}>Your payments</Text>
-        {data.payments.length === 0 ? (
-          <Text style={styles.helper}>No payments yet.</Text>
-        ) : (
-          <View style={styles.tableLike}>
-            {data.payments.map((payment) => (
-              <View key={payment.id} style={styles.tableRow}>
-                <View style={styles.tableMain}>
-                  <Text style={styles.rowTitle}>{payment.rent_month}</Text>
-                  <Text style={styles.rowMeta}>
-                    {payment.bank_name} ({payment.account_number})
-                  </Text>
-                </View>
-                <View style={styles.tableNumbers}>
-                  <Text style={styles.rowValue}>{money(payment.amount)}</Text>
-                  <Text style={styles.rowMeta}>{payment.paid_on}</Text>
-                </View>
-                <StatusBadge status={payment.status} />
-              </View>
-            ))}
+      <View style={styles.dashboardGrid}>
+        <View style={styles.dashboardMainColumn}>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Razorpay</Text>
+            <Text style={styles.panelTitle}>Pay rent inside the app</Text>
+            <View style={styles.formGrid}>
+              <Field
+                label="Rent month"
+                value={paymentForm.rent_month}
+                onChangeText={(rent_month) => setPaymentForm({ ...paymentForm, rent_month })}
+              />
+              <Field
+                label="Amount"
+                value={String(paymentForm.amount)}
+                onChangeText={(amount) => setPaymentForm({ ...paymentForm, amount })}
+                keyboardType="numeric"
+              />
+              <Field
+                label="Bank account id"
+                value={String(paymentForm.bank_account_id)}
+                onChangeText={(bank_account_id) => setPaymentForm({ ...paymentForm, bank_account_id: Number(bank_account_id) || 0 })}
+                keyboardType="numeric"
+              />
+            </View>
+            <Text style={styles.helper}>
+              Available accounts: {data.bank_accounts.map((account) => `${account.id}: ${account.bank_name}`).join(" • ")}
+            </Text>
+            <PrimaryButton label={busy ? "Processing..." : "Pay rent"} onPress={onSubmit} disabled={busy} fullWidth />
           </View>
-        )}
+        </View>
+
+        <View style={styles.dashboardSideColumn}>
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>History</Text>
+            <Text style={styles.panelTitle}>Your payments</Text>
+            {data.payments.length === 0 ? (
+              <Text style={styles.helper}>No payments yet.</Text>
+            ) : (
+              <View style={styles.tableLike}>
+                {data.payments.map((payment) => (
+                  <View key={payment.id} style={styles.tableRow}>
+                    <View style={styles.tableMain}>
+                      <Text style={styles.rowTitle}>{payment.rent_month}</Text>
+                      <Text style={styles.rowMeta}>
+                        {payment.bank_name} ({payment.account_number})
+                      </Text>
+                    </View>
+                    <View style={styles.tableNumbers}>
+                      <Text style={styles.rowValue}>{money(payment.amount)}</Text>
+                      <Text style={styles.rowMeta}>{payment.paid_on}</Text>
+                    </View>
+                    <StatusBadge status={payment.status} />
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        </View>
       </View>
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -1868,7 +2569,7 @@ function TenantView({
 // Plans & Billing screen
 // ---------------------------------------------------------------------------
 
-function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () => void; onRefresh: () => void }) {
+function PlansScreen({ token, onBack, onRefresh, visible = true }: { token: string; onBack: () => void; onRefresh: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [subData, setSubData] = useState<SubscriptionResponse | null>(null);
@@ -1956,7 +2657,8 @@ function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () =
   const addonsCatalog = subData?.addons_catalog || [];
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Dashboard" active={false} onPress={onBack} />
         <ActionChip icon="💎" label="Plans" active={true} onPress={() => {}} />
@@ -2055,7 +2757,8 @@ function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () =
           })}
         </View>
       </View>
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -2063,7 +2766,7 @@ function PlansScreen({ token, onBack, onRefresh }: { token: string; onBack: () =
 // Analytics screen (premium)
 // ---------------------------------------------------------------------------
 
-function AnalyticsScreen({ token, onBack, onNavigate }: { token: string; onBack: () => void; onNavigate?: (screen: string) => void }) {
+function AnalyticsScreen({ token, onBack, onNavigate, visible = true }: { token: string; onBack: () => void; onNavigate?: (screen: string) => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
@@ -2088,7 +2791,8 @@ function AnalyticsScreen({ token, onBack, onNavigate }: { token: string; onBack:
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Dashboard" active={false} onPress={onBack} />
         <ActionChip icon="📈" label="Analytics" active={true} onPress={() => {}} />
@@ -2245,14 +2949,16 @@ function AnalyticsScreen({ token, onBack, onNavigate }: { token: string; onBack:
           <Text style={styles.helper}>{msg || "Unable to load analytics."}</Text>
         </View>
       )}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant") => void; busy: boolean }) {
+function RolePicker({ onSelect, busy, visible = true }: { onSelect: (role: "landlord" | "tenant") => void; busy: boolean; visible?: boolean }) {
   const { s: styles } = useT();
   return (
-    <View style={styles.panel}>
+    <AppearOnMount visible={visible} unmountOnExit>
+      <View style={styles.panel}>
       <Text style={styles.sectionKicker}>Welcome</Text>
       <Text style={styles.panelTitle}>How will you use RentFlo?</Text>
       <Text style={styles.helper}>
@@ -2280,14 +2986,16 @@ function RolePicker({ onSelect, busy }: { onSelect: (role: "landlord" | "tenant"
           </Text>
         </Pressable>
       </View>
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
 function TenantWelcome({ user }: { user: AuthUser }) {
   const { t, s: styles } = useT();
   return (
-    <View style={styles.panel}>
+    <AppearOnMount>
+      <View style={styles.panel}>
       <Text style={styles.sectionKicker}>Almost there</Text>
       <Text style={styles.panelTitle}>Welcome, {user.first_name || user.username}!</Text>
       <Text style={styles.helper}>
@@ -2310,7 +3018,8 @@ function TenantWelcome({ user }: { user: AuthUser }) {
         <Text style={styles.helper}>2. They'll enter the code and assign a unit</Text>
         <Text style={styles.helper}>3. Refresh this page to see your dashboard</Text>
       </View>
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -2319,7 +3028,7 @@ function Field(props: {
   value: string;
   onChangeText: (value: string) => void;
   secureTextEntry?: boolean;
-  keyboardType?: "default" | "numeric";
+  keyboardType?: "default" | "numeric" | "phone-pad" | "number-pad";
   placeholder?: string;
 }) {
   const { t, s: styles } = useT();
@@ -2439,13 +3148,45 @@ function AddressSearch({ value, onSelect }: { value: string; onSelect: (address:
   );
 }
 
-function SummaryCard({ label, value, note }: { label: string; value: string; note: string }) {
+function SummaryCard({
+  label,
+  value,
+  note,
+  actionText,
+  active = false,
+  onPress,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  actionText?: string;
+  active?: boolean;
+  onPress?: () => void;
+}) {
   const { s: styles } = useT();
-  return (
-    <View style={styles.summaryCard}>
+  const content = (
+    <>
       <Text style={styles.summaryLabel}>{label}</Text>
       <Text style={styles.summaryValue}>{value}</Text>
       <Text style={styles.summaryNote}>{note}</Text>
+      {actionText ? <Text style={styles.summaryActionText}>{actionText}</Text> : null}
+    </>
+  );
+
+  if (onPress) {
+    return (
+      <Pressable
+        onPress={onPress}
+        style={[styles.summaryCard, styles.summaryCardInteractive, active && styles.summaryCardActive]}
+      >
+        {content}
+      </Pressable>
+    );
+  }
+
+  return (
+    <View style={[styles.summaryCard, active && styles.summaryCardActive]}>
+      {content}
     </View>
   );
 }
@@ -2493,12 +3234,11 @@ function PrimaryButton({
         : styles.buttonText;
   return (
     <Pressable
-      style={({ pressed }) => [
+      style={[
         styles.button,
         variantStyle,
         fullWidth && { alignSelf: "stretch" as const },
         disabled && styles.disabledButton,
-        pressed && !disabled && { opacity: 0.85, transform: [{ scale: 0.98 }] },
       ]}
       onPress={onPress}
       disabled={disabled}
@@ -2526,7 +3266,7 @@ function ActionChip({ icon, label, active, onPress, disabled }: { icon: string; 
 // PREMIUM ANALYTICS DETAIL SCREENS
 // ============================================================================
 
-function DelinquencyAnalyticsScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function DelinquencyAnalyticsScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2540,7 +3280,8 @@ function DelinquencyAnalyticsScreen({ token, onBack }: { token: string; onBack: 
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="⚠️" label="Delinquency" active={true} onPress={() => {}} />
@@ -2628,11 +3369,12 @@ function DelinquencyAnalyticsScreen({ token, onBack }: { token: string; onBack: 
           )}
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function CashFlowForecastScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function CashFlowForecastScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2646,7 +3388,8 @@ function CashFlowForecastScreen({ token, onBack }: { token: string; onBack: () =
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="💰" label="Cash Flow" active={true} onPress={() => {}} />
@@ -2699,11 +3442,12 @@ function CashFlowForecastScreen({ token, onBack }: { token: string; onBack: () =
           })()}
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function PropertyROIScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function PropertyROIScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2717,7 +3461,8 @@ function PropertyROIScreen({ token, onBack }: { token: string; onBack: () => voi
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="🏆" label="ROI Analysis" active={true} onPress={() => {}} />
@@ -2767,11 +3512,12 @@ function PropertyROIScreen({ token, onBack }: { token: string; onBack: () => voi
           </View>
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function TenantRiskScoringScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function TenantRiskScoringScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2791,7 +3537,8 @@ function TenantRiskScoringScreen({ token, onBack }: { token: string; onBack: () 
   }
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="👥" label="Tenant Risk" active={true} onPress={() => {}} />
@@ -2837,11 +3584,12 @@ function TenantRiskScoringScreen({ token, onBack }: { token: string; onBack: () 
           </View>
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function MaintenanceIntelligenceScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function MaintenanceIntelligenceScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2855,7 +3603,8 @@ function MaintenanceIntelligenceScreen({ token, onBack }: { token: string; onBac
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="🔧" label="Maintenance" active={true} onPress={() => {}} />
@@ -2909,11 +3658,12 @@ function MaintenanceIntelligenceScreen({ token, onBack }: { token: string; onBac
           )}
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
-function TaxComplianceReportScreen({ token, onBack }: { token: string; onBack: () => void }) {
+function TaxComplianceReportScreen({ token, onBack, visible = true }: { token: string; onBack: () => void; visible?: boolean }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -2927,7 +3677,8 @@ function TaxComplianceReportScreen({ token, onBack }: { token: string; onBack: (
   }, [token]);
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Analytics" active={false} onPress={onBack} />
         <ActionChip icon="📋" label="Tax Report" active={true} onPress={() => {}} />
@@ -2983,7 +3734,8 @@ function TaxComplianceReportScreen({ token, onBack }: { token: string; onBack: (
           </View>
         </>
       ) : null}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -2995,12 +3747,14 @@ function OnboardingScreen({
   isLandlord,
   onBack,
   onRefresh,
+  visible = true,
 }: {
   token: string;
   tenancyId: number;
   isLandlord: boolean;
   onBack: () => void;
   onRefresh: () => void;
+  visible?: boolean;
 }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
@@ -3099,7 +3853,8 @@ function OnboardingScreen({
   }
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
         <ActionChip icon="📋" label="Onboarding" active={true} onPress={() => {}} />
@@ -3235,7 +3990,8 @@ function OnboardingScreen({
           </View>
         </>
       )}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -3245,10 +4001,12 @@ function TicketsScreen({
   token,
   isLandlord,
   onBack,
+  visible = true,
 }: {
   token: string;
   isLandlord: boolean;
   onBack: () => void;
+  visible?: boolean;
 }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
@@ -3315,7 +4073,8 @@ function TicketsScreen({
   };
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
         <ActionChip icon="🎫" label="Tickets" active={true} onPress={() => {}} />
@@ -3325,21 +4084,24 @@ function TicketsScreen({
 
       {!isLandlord && (
         <View style={{ marginTop: 8 }}>
-          {showCreate ? (
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>New Ticket</Text>
-              <View style={styles.formGrid}>
-                <Field label="Subject" value={subject} onChangeText={setSubject} placeholder="e.g. Leaking tap in bathroom" />
-                <Field label="Description" value={description} onChangeText={setDescription} placeholder="Detailed description..." />
+          <AppearOnMount visible={showCreate} unmountOnExit>
+            {showCreate ? (
+              <View style={styles.panel}>
+                <Text style={styles.sectionKicker}>New Ticket</Text>
+                <View style={styles.formGrid}>
+                  <Field label="Subject" value={subject} onChangeText={setSubject} placeholder="e.g. Leaking tap in bathroom" />
+                  <Field label="Description" value={description} onChangeText={setDescription} placeholder="Detailed description..." />
+                </View>
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                  <PrimaryButton label={busy ? "Creating..." : "Submit Ticket"} onPress={handleCreate} disabled={busy} />
+                  <Pressable onPress={() => setShowCreate(false)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+                </View>
               </View>
-              <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-                <PrimaryButton label={busy ? "Creating..." : "Submit Ticket"} onPress={handleCreate} disabled={busy} />
-                <Pressable onPress={() => setShowCreate(false)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
-              </View>
-            </View>
-          ) : (
+            ) : null}
+          </AppearOnMount>
+          {!showCreate ? (
             <PrimaryButton label="+ Raise a Ticket" onPress={() => setShowCreate(true)} fullWidth />
-          )}
+          ) : null}
         </View>
       )}
 
@@ -3367,77 +4129,88 @@ function TicketsScreen({
 
               {/* Landlord can update ticket */}
               {isLandlord && ticket.status !== "closed" && (
-                editingId === ticket.id ? (
-                  <View style={[styles.formGrid, { marginTop: 8 }]}>
-                    <View>
-                      <Text style={styles.fieldLabel}>Status</Text>
-                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
-                        {(["in_progress", "resolved", "closed"] as const).map((s) => (
-                          <Pressable
-                            key={s}
-                            onPress={() => setEditStatus(s)}
-                            style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editStatus === s ? t.primary : t.inputBg, borderWidth: 1, borderColor: editStatus === s ? t.primary : t.inputBorder }}
-                          >
-                            <Text style={{ color: editStatus === s ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{s.replace("_", " ").toUpperCase()}</Text>
-                          </Pressable>
-                        ))}
+                <>
+                  <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
+                    {editingId === ticket.id ? (
+                    <View style={[styles.formGrid, { marginTop: 8 }]}>
+                      <View>
+                        <Text style={styles.fieldLabel}>Status</Text>
+                        <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                          {(["in_progress", "resolved", "closed"] as const).map((s) => (
+                            <Pressable
+                              key={s}
+                              onPress={() => setEditStatus(s)}
+                              style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editStatus === s ? t.primary : t.inputBg, borderWidth: 1, borderColor: editStatus === s ? t.primary : t.inputBorder }}
+                            >
+                              <Text style={{ color: editStatus === s ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{s.replace("_", " ").toUpperCase()}</Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+                      <View>
+                        <Text style={styles.fieldLabel}>Resolution by</Text>
+                        <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                          {(["urban_clap", "owner", "tenant"] as const).map((p) => (
+                            <Pressable
+                              key={p}
+                              onPress={() => setEditProvider(p)}
+                              style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editProvider === p ? t.primary : t.inputBg, borderWidth: 1, borderColor: editProvider === p ? t.primary : t.inputBorder }}
+                            >
+                              <Text style={{ color: editProvider === p ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{p === "urban_clap" ? "Urban Clap" : p === "owner" ? "Owner" : "Tenant"}</Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+                      <Field label="Resolution notes" value={editNotes} onChangeText={setEditNotes} placeholder="What was done..." />
+                      <Field label="Receipt URL (optional)" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://..." />
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <PrimaryButton label={busy ? "Saving..." : "Save"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                        <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
                       </View>
                     </View>
-                    <View>
-                      <Text style={styles.fieldLabel}>Resolution by</Text>
-                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
-                        {(["urban_clap", "owner", "tenant"] as const).map((p) => (
-                          <Pressable
-                            key={p}
-                            onPress={() => setEditProvider(p)}
-                            style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: editProvider === p ? t.primary : t.inputBg, borderWidth: 1, borderColor: editProvider === p ? t.primary : t.inputBorder }}
-                          >
-                            <Text style={{ color: editProvider === p ? t.primaryText : t.text, fontSize: 12, fontWeight: "600" }}>{p === "urban_clap" ? "Urban Clap" : p === "owner" ? "Owner" : "Tenant"}</Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    </View>
-                    <Field label="Resolution notes" value={editNotes} onChangeText={setEditNotes} placeholder="What was done..." />
-                    <Field label="Receipt URL (optional)" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://..." />
-                    <View style={{ flexDirection: "row", gap: 8 }}>
-                      <PrimaryButton label={busy ? "Saving..." : "Save"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
-                      <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
-                    </View>
-                  </View>
-                ) : (
-                  <Pressable
-                    style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
-                    onPress={() => { setEditingId(ticket.id); setEditStatus(ticket.status); setEditProvider(ticket.resolution_provider); setEditNotes(ticket.resolution_notes); setEditReceipt(ticket.receipt_url); }}
-                  >
-                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Update Ticket</Text>
-                  </Pressable>
-                )
+                    ) : null}
+                  </AppearOnMount>
+                  {editingId !== ticket.id ? (
+                    <Pressable
+                      style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
+                      onPress={() => { setEditingId(ticket.id); setEditStatus(ticket.status); setEditProvider(ticket.resolution_provider); setEditNotes(ticket.resolution_notes); setEditReceipt(ticket.receipt_url); }}
+                    >
+                      <Text style={[styles.removeButtonText, { color: t.primary }]}>Update Ticket</Text>
+                    </Pressable>
+                  ) : null}
+                </>
               )}
 
               {/* Tenant can upload receipt */}
               {!isLandlord && ticket.status !== "closed" && (
-                editingId === ticket.id ? (
-                  <View style={[styles.formGrid, { marginTop: 8 }]}>
-                    <Field label="Receipt URL" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://receipt..." />
-                    <View style={{ flexDirection: "row", gap: 8 }}>
-                      <PrimaryButton label={busy ? "Saving..." : "Upload Receipt"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
-                      <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+                <>
+                  <AppearOnMount visible={editingId === ticket.id} unmountOnExit>
+                    {editingId === ticket.id ? (
+                    <View style={[styles.formGrid, { marginTop: 8 }]}>
+                      <Field label="Receipt URL" value={editReceipt} onChangeText={setEditReceipt} placeholder="https://receipt..." />
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <PrimaryButton label={busy ? "Saving..." : "Upload Receipt"} onPress={() => handleUpdate(ticket.id)} disabled={busy} />
+                        <Pressable onPress={() => setEditingId(null)} style={styles.removeButton}><Text style={styles.removeButtonText}>Cancel</Text></Pressable>
+                      </View>
                     </View>
-                  </View>
-                ) : (
-                  <Pressable
-                    style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
-                    onPress={() => { setEditingId(ticket.id); setEditReceipt(ticket.receipt_url); }}
-                  >
-                    <Text style={[styles.removeButtonText, { color: t.primary }]}>Add Receipt</Text>
-                  </Pressable>
-                )
+                    ) : null}
+                  </AppearOnMount>
+                  {editingId !== ticket.id ? (
+                    <Pressable
+                      style={[styles.removeButton, { marginTop: 8, backgroundColor: t.primaryMuted }]}
+                      onPress={() => { setEditingId(ticket.id); setEditReceipt(ticket.receipt_url); }}
+                    >
+                      <Text style={[styles.removeButtonText, { color: t.primary }]}>Add Receipt</Text>
+                    </Pressable>
+                  ) : null}
+                </>
               )}
             </View>
           ))}
         </View>
       )}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 
@@ -3449,12 +4222,14 @@ function OffboardingScreen({
   isLandlord,
   onBack,
   onRefresh,
+  visible = true,
 }: {
   token: string;
   tenancyId: number;
   isLandlord: boolean;
   onBack: () => void;
   onRefresh: () => void;
+  visible?: boolean;
 }) {
   const { t, s: styles } = useT();
   const [loading, setLoading] = useState(true);
@@ -3537,7 +4312,8 @@ function OffboardingScreen({
   const currentStep = data ? statusSteps.findIndex((s) => s.key === data.status) : -1;
 
   return (
-    <View style={styles.stack}>
+    <AppearOnMount visible={visible}>
+      <View style={styles.stack}>
       <View style={styles.navChips}>
         <ActionChip icon="←" label="Back" active={false} onPress={onBack} />
         <ActionChip icon="🚪" label="Offboarding" active={true} onPress={() => {}} />
@@ -3547,21 +4323,25 @@ function OffboardingScreen({
 
       {loading ? <ActivityIndicator color={t.accent} style={{ marginTop: 16 }} /> : null}
 
-      {notStarted && isLandlord && (
-        <View style={styles.panel}>
-          <Text style={styles.sectionKicker}>Start offboarding</Text>
-          <Text style={styles.helper}>Optionally specify deposit deductions upfront.</Text>
-          <View style={styles.formGrid}>
-            <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
-            <Field label="Deduction reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, cleaning, etc." />
+      <AppearOnMount visible={notStarted && isLandlord} unmountOnExit>
+        {notStarted && isLandlord ? (
+          <View style={styles.panel}>
+            <Text style={styles.sectionKicker}>Start offboarding</Text>
+            <Text style={styles.helper}>Optionally specify deposit deductions upfront.</Text>
+            <View style={styles.formGrid}>
+              <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
+              <Field label="Deduction reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, cleaning, etc." />
+            </View>
+            <PrimaryButton label={busy ? "Processing..." : "Initiate Offboarding"} onPress={handleInitiate} disabled={busy} fullWidth />
           </View>
-          <PrimaryButton label={busy ? "Processing..." : "Initiate Offboarding"} onPress={handleInitiate} disabled={busy} fullWidth />
-        </View>
-      )}
+        ) : null}
+      </AppearOnMount>
 
-      {notStarted && !isLandlord && (
-        <View style={styles.panel}><Text style={styles.helper}>Offboarding has not been initiated by the landlord yet.</Text></View>
-      )}
+      <AppearOnMount visible={notStarted && !isLandlord} unmountOnExit>
+        {notStarted && !isLandlord ? (
+          <View style={styles.panel}><Text style={styles.helper}>Offboarding has not been initiated by the landlord yet.</Text></View>
+        ) : null}
+      </AppearOnMount>
 
       {data && (
         <>
@@ -3603,49 +4383,58 @@ function OffboardingScreen({
           )}
 
           {/* Settle deposit (landlord) */}
-          {isLandlord && data.status === "initiated" && (
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Settle Deposit</Text>
-              <Text style={styles.helper}>Apply deductions and calculate refund. Deductions greater than deposit means tenant pays extra.</Text>
-              <View style={styles.formGrid}>
-                <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
-                <Field label="Reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, painting, etc." />
+          <AppearOnMount visible={isLandlord && data.status === "initiated"} unmountOnExit>
+            {isLandlord && data.status === "initiated" ? (
+              <View style={styles.panel}>
+                <Text style={styles.sectionKicker}>Settle Deposit</Text>
+                <Text style={styles.helper}>Apply deductions and calculate refund. Deductions greater than deposit means tenant pays extra.</Text>
+                <View style={styles.formGrid}>
+                  <Field label="Deductions" value={deductions} onChangeText={setDeductions} keyboardType="numeric" placeholder="e.g. 5000" />
+                  <Field label="Reasons" value={deductionReasons} onChangeText={setDeductionReasons} placeholder="Damages, painting, etc." />
+                </View>
+                <PrimaryButton label={busy ? "Settling..." : "Settle Deposit"} onPress={handleSettleDeposit} disabled={busy} fullWidth />
               </View>
-              <PrimaryButton label={busy ? "Settling..." : "Settle Deposit"} onPress={handleSettleDeposit} disabled={busy} fullWidth />
-            </View>
-          )}
+            ) : null}
+          </AppearOnMount>
 
           {/* Handoff (landlord) */}
-          {isLandlord && (data.status === "deposit_settled" || data.status === "final_rent_paid") && (
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Handoff</Text>
-              <Text style={styles.helper}>Upload the handoff letter/document and complete the handoff. Unit will be marked under maintenance.</Text>
-              <View style={styles.formGrid}>
-                <Field label="Handoff document URL" value={handoffDocUrl} onChangeText={setHandoffDocUrl} placeholder="https://..." />
+          <AppearOnMount visible={isLandlord && (data.status === "deposit_settled" || data.status === "final_rent_paid")} unmountOnExit>
+            {isLandlord && (data.status === "deposit_settled" || data.status === "final_rent_paid") ? (
+              <View style={styles.panel}>
+                <Text style={styles.sectionKicker}>Handoff</Text>
+                <Text style={styles.helper}>Upload the handoff letter/document and complete the handoff. Unit will be marked under maintenance.</Text>
+                <View style={styles.formGrid}>
+                  <Field label="Handoff document URL" value={handoffDocUrl} onChangeText={setHandoffDocUrl} placeholder="https://..." />
+                </View>
+                <PrimaryButton label={busy ? "Processing..." : "Complete Handoff"} onPress={handleHandoff} disabled={busy} fullWidth />
               </View>
-              <PrimaryButton label={busy ? "Processing..." : "Complete Handoff"} onPress={handleHandoff} disabled={busy} fullWidth />
-            </View>
-          )}
+            ) : null}
+          </AppearOnMount>
 
           {/* Maintenance done (landlord) */}
-          {isLandlord && data.status === "under_maintenance" && (
-            <View style={styles.panel}>
-              <Text style={styles.sectionKicker}>Maintenance</Text>
-              <Text style={styles.helper}>Once maintenance is complete, confirm to make the unit available for new tenants.</Text>
-              <Text style={[styles.helper, { fontStyle: "italic" }]}>TODO: Auto-publish to NoBroker.com once available</Text>
-              <PrimaryButton label={busy ? "Processing..." : "Confirm Maintenance Done"} onPress={handleMaintenanceDone} disabled={busy} fullWidth />
-            </View>
-          )}
+          <AppearOnMount visible={isLandlord && data.status === "under_maintenance"} unmountOnExit>
+            {isLandlord && data.status === "under_maintenance" ? (
+              <View style={styles.panel}>
+                <Text style={styles.sectionKicker}>Maintenance</Text>
+                <Text style={styles.helper}>Once maintenance is complete, confirm to make the unit available for new tenants.</Text>
+                <Text style={[styles.helper, { fontStyle: "italic" }]}>TODO: Auto-publish to NoBroker.com once available</Text>
+                <PrimaryButton label={busy ? "Processing..." : "Confirm Maintenance Done"} onPress={handleMaintenanceDone} disabled={busy} fullWidth />
+              </View>
+            ) : null}
+          </AppearOnMount>
 
-          {data.status === "completed" && (
-            <View style={styles.panel}>
-              <Text style={[styles.panelTitle, { color: t.successText }]}>✓ Offboarding Complete</Text>
-              <Text style={styles.helper}>The unit is now available for rent.</Text>
-            </View>
-          )}
+          <AppearOnMount visible={data.status === "completed"} unmountOnExit>
+            {data.status === "completed" ? (
+              <View style={styles.panel}>
+                <Text style={[styles.panelTitle, { color: t.successText }]}>✓ Offboarding Complete</Text>
+                <Text style={styles.helper}>The unit is now available for rent.</Text>
+              </View>
+            ) : null}
+          </AppearOnMount>
         </>
       )}
-    </View>
+      </View>
+    </AppearOnMount>
   );
 }
 

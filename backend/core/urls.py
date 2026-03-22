@@ -18,6 +18,7 @@ from .views import (
     CreateUnitView,
     DelinquencyAnalyticsView,
     EndTenancyView,
+    FirebaseLandlordAuthView,
     GoogleLoginView,
     InitiateOffboardingView,
     InitiateTenantPaymentView,
@@ -47,6 +48,7 @@ from .views import (
 
 urlpatterns = [
     path("auth/login/", LoginView.as_view(), name="api-login"),
+    path("auth/firebase/landlord/", FirebaseLandlordAuthView.as_view(), name="api-firebase-landlord-auth"),
     path("auth/signup/", SignupView.as_view(), name="api-signup"),
     path("auth/google/", GoogleLoginView.as_view(), name="api-google-login"),
     path("auth/me/", MeView.as_view(), name="api-me"),

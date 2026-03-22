@@ -1,6 +1,8 @@
-import csv
+import html
 import io
+import re
 import uuid
+import zipfile
 from datetime import date
 from decimal import Decimal
 
@@ -30,6 +32,7 @@ from .serializers import (
     CreateTicketSerializer,
     CreateUnitSerializer,
     DepositSerializer,
+    FirebaseLandlordAuthSerializer,
     GoogleLoginSerializer,
     InitiateOffboardingSerializer,
     InitiatePaymentSerializer,
@@ -52,7 +55,16 @@ from .serializers import (
     UploadDocumentSerializer,
     UserSerializer,
 )
-from .services import RazorpayClient, RazorpayClientError, verify_google_id_token
+from .services import (
+    FirebaseAuthError,
+    RazorpayClient,
+    RazorpayClientError,
+    find_user_by_phone,
+    is_firebase_landlord_auth_enabled,
+    normalize_phone,
+    verify_firebase_id_token,
+    verify_google_id_token,
+)
 
 
 def _resolve_tenant(identifier: str):
@@ -70,6 +82,35 @@ def current_month():
 class AuthenticatedAPIView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [permissions.IsAuthenticated]
+
+
+def _issue_token(user):
+    token = Token.objects.filter(user=user).order_by("created").first()
+    if not token:
+        token = Token.objects.create(user=user)
+    Token.objects.filter(user=user).exclude(key=token.key).delete()
+    return token
+
+
+def _generate_username_from_email(email: str) -> str:
+    base = re.sub(r"[^a-zA-Z0-9._-]", "", email.split("@", 1)[0]) or "landlord"
+    base = base[:140]
+    username = base
+    suffix = 1
+    while User.objects.filter(username=username).exists():
+        suffix_text = str(suffix)
+        username = f"{base[:150 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return username
+
+
+def _split_display_name(display_name: str):
+    parts = (display_name or "").strip().split()
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
 
 
 def _ensure_subscription(user):
@@ -132,8 +173,96 @@ class LoginView(APIView):
         serializer = AuthLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
-        token, _ = Token.objects.get_or_create(user=user)
+        token = _issue_token(user)
         return Response({"token": token.key, "user": UserSerializer(user).data})
+
+
+class FirebaseLandlordAuthView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        if not is_firebase_landlord_auth_enabled():
+            return Response(
+                {"detail": "Firebase landlord auth is disabled."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        serializer = FirebaseLandlordAuthSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            firebase_user = verify_firebase_id_token(serializer.validated_data["id_token"])
+        except FirebaseAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        uid = firebase_user["uid"]
+        email = firebase_user["email"]
+        requested_phone = serializer.validated_data["phone"]
+        phone = requested_phone or firebase_user["phone"]
+        display_first_name, display_last_name = _split_display_name(firebase_user["display_name"])
+        first_name = serializer.validated_data["first_name"].strip() or display_first_name
+        last_name = serializer.validated_data["last_name"].strip() or display_last_name
+
+        user = User.objects.filter(firebase_uid=uid).first()
+        if not user:
+            user = User.objects.filter(email__iexact=email).first()
+
+        if user and user.role != User.Role.LANDLORD:
+            return Response(
+                {"detail": "This email is already linked to a tenant account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user and user.firebase_uid and user.firebase_uid != uid:
+            return Response(
+                {"detail": "This landlord account is already linked to a different Firebase user."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if phone:
+            phone_owner = find_user_by_phone(phone)
+            if phone_owner and phone_owner != user:
+                return Response(
+                    {"detail": "Phone number already registered."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        is_new = user is None
+        if is_new:
+            user = User(
+                username=_generate_username_from_email(email),
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone=phone,
+                role=User.Role.LANDLORD,
+                firebase_uid=uid,
+            )
+            user.set_unusable_password()
+            user.save()
+        else:
+            changed_fields = []
+            if user.firebase_uid != uid:
+                user.firebase_uid = uid
+                changed_fields.append("firebase_uid")
+            if user.email.lower() != email:
+                user.email = email
+                changed_fields.append("email")
+            if first_name and user.first_name != first_name:
+                user.first_name = first_name
+                changed_fields.append("first_name")
+            if last_name and user.last_name != last_name:
+                user.last_name = last_name
+                changed_fields.append("last_name")
+            normalized_phone = normalize_phone(phone)
+            if normalized_phone and user.phone != normalized_phone:
+                user.phone = normalized_phone
+                changed_fields.append("phone")
+            if changed_fields:
+                user.save(update_fields=changed_fields)
+
+        _ensure_subscription(user)
+        token = _issue_token(user)
+        return Response({"token": token.key, "user": UserSerializer(user).data, "is_new": is_new})
 
 
 class SignupView(APIView):
@@ -145,7 +274,7 @@ class SignupView(APIView):
         user = serializer.save()
         if user.role == User.Role.LANDLORD:
             _ensure_subscription(user)
-        token, _ = Token.objects.get_or_create(user=user)
+        token = _issue_token(user)
         return Response(
             {"token": token.key, "user": UserSerializer(user).data},
             status=status.HTTP_201_CREATED,
@@ -184,7 +313,7 @@ class GoogleLoginView(APIView):
             user.set_unusable_password()
             user.save()
 
-        token, _ = Token.objects.get_or_create(user=user)
+        token = _issue_token(user)
         return Response({"token": token.key, "user": UserSerializer(user).data, "is_new": is_new})
 
 
@@ -849,6 +978,269 @@ class AnalyticsDashboardView(AuthenticatedAPIView):
 # Payment Reports Export (premium feature)
 # ---------------------------------------------------------------------------
 
+PAYMENT_REPORT_HEADERS = [
+    "Tenant",
+    "Building",
+    "Unit",
+    "Month",
+    "Amount",
+    "Paid On",
+    "Bank",
+    "Account",
+    "Status",
+    "Reference",
+    "Provider Payment ID",
+]
+
+
+def _payment_report_rows(qs):
+    rows = []
+    for payment in qs:
+        tenant_name = payment.tenancy.tenant_user.get_full_name().strip() or payment.tenancy.tenant_user.username
+        rows.append({
+            "tenant": tenant_name,
+            "building": payment.unit.building.name,
+            "unit": payment.unit.label,
+            "month": payment.rent_month,
+            "amount": str(payment.amount),
+            "paid_on": str(payment.paid_on or ""),
+            "bank": payment.bank_account.bank_name,
+            "account": payment.bank_account.account_number,
+            "status": payment.status,
+            "reference": payment.reference,
+            "provider_payment_id": payment.provider_payment_id,
+        })
+    return rows
+
+
+def _build_excel_payment_report(rows):
+    def column_name(index):
+        name = ""
+        number = index
+        while number > 0:
+            number, remainder = divmod(number - 1, 26)
+            name = chr(65 + remainder) + name
+        return name
+
+    def inline_cell(reference, value):
+        escaped = html.escape(str(value or ""))
+        return f'<c r="{reference}" t="inlineStr"><is><t xml:space="preserve">{escaped}</t></is></c>'
+
+    sheet_rows = []
+    all_rows = [
+        PAYMENT_REPORT_HEADERS,
+        *[
+            [
+                row["tenant"],
+                row["building"],
+                row["unit"],
+                row["month"],
+                row["amount"],
+                row["paid_on"],
+                row["bank"],
+                row["account"],
+                row["status"],
+                row["reference"],
+                row["provider_payment_id"],
+            ]
+            for row in rows
+        ],
+    ]
+
+    for row_index, values in enumerate(all_rows, start=1):
+        cells = [
+            inline_cell(f"{column_name(column_index)}{row_index}", value)
+            for column_index, value in enumerate(values, start=1)
+        ]
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+
+    worksheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        '<cols>'
+        '<col min="1" max="1" width="24" customWidth="1"/>'
+        '<col min="2" max="2" width="20" customWidth="1"/>'
+        '<col min="3" max="3" width="12" customWidth="1"/>'
+        '<col min="4" max="4" width="12" customWidth="1"/>'
+        '<col min="5" max="5" width="14" customWidth="1"/>'
+        '<col min="6" max="6" width="14" customWidth="1"/>'
+        '<col min="7" max="7" width="18" customWidth="1"/>'
+        '<col min="8" max="8" width="18" customWidth="1"/>'
+        '<col min="9" max="9" width="14" customWidth="1"/>'
+        '<col min="10" max="10" width="18" customWidth="1"/>'
+        '<col min="11" max="11" width="22" customWidth="1"/>'
+        '</cols>'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+        '</worksheet>'
+    )
+
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '</Types>'
+    )
+
+    rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Payments" sheetId="1" r:id="rId1"/></sheets>'
+        '</workbook>'
+    )
+
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '</Relationships>'
+    )
+
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border/></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as workbook_zip:
+        workbook_zip.writestr("[Content_Types].xml", content_types_xml)
+        workbook_zip.writestr("_rels/.rels", rels_xml)
+        workbook_zip.writestr("xl/workbook.xml", workbook_xml)
+        workbook_zip.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        workbook_zip.writestr("xl/styles.xml", styles_xml)
+        workbook_zip.writestr("xl/worksheets/sheet1.xml", worksheet_xml)
+
+    return buffer.getvalue()
+
+
+def _clip_pdf_text(value, width):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= width:
+        return text.ljust(width)
+    if width <= 3:
+        return text[:width]
+    return f"{text[:width - 3]}..."
+
+
+def _escape_pdf_text(value):
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _build_pdf_content_stream(lines):
+    commands = [
+        "BT",
+        "/F1 8.5 Tf",
+        "12 TL",
+        "36 756 Td",
+    ]
+    for index, line in enumerate(lines):
+        if index > 0:
+            commands.append("T*")
+        commands.append(f"({_escape_pdf_text(line)}) Tj")
+    commands.append("ET")
+    return "\n".join(commands).encode("latin-1", "replace")
+
+
+def _build_pdf_payment_report(rows, from_month="", to_month=""):
+    filter_label = f"{from_month or 'Any'} to {to_month or 'Any'}"
+    lines = [
+        "RentFlo Payment Report",
+        f"Generated: {date.today().isoformat()}",
+        f"Month range: {filter_label}",
+        "",
+        "Tenant             | Building           | Unit     | Month   | Amount      | Paid On    | Status",
+        "-" * 96,
+    ]
+
+    if not rows:
+        lines.append("No payments found for the selected filters.")
+    else:
+        for row in rows:
+            lines.append(
+                " | ".join([
+                    _clip_pdf_text(row["tenant"], 18),
+                    _clip_pdf_text(row["building"], 18),
+                    _clip_pdf_text(row["unit"], 8),
+                    _clip_pdf_text(row["month"], 7),
+                    _clip_pdf_text(row["amount"], 11),
+                    _clip_pdf_text(row["paid_on"], 10),
+                    _clip_pdf_text(row["status"], 10),
+                ])
+            )
+            lines.append(
+                f"  Bank: {_clip_pdf_text(row['bank'], 18)} {_clip_pdf_text(row['account'], 12)}"
+                f"  Ref: {_clip_pdf_text(row['reference'], 16)}"
+                f"  Provider: {_clip_pdf_text(row['provider_payment_id'], 18)}"
+            )
+            lines.append("")
+
+    lines_per_page = 45
+    page_chunks = [lines[i:i + lines_per_page] for i in range(0, len(lines), lines_per_page)] or [["RentFlo Payment Report"]]
+
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: f"<< /Type /Pages /Count {len(page_chunks)} /Kids [{' '.join(f'{4 + (index * 2)} 0 R' for index in range(len(page_chunks)))}] >>".encode("ascii"),
+        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+    }
+
+    for index, chunk in enumerate(page_chunks):
+        page_id = 4 + (index * 2)
+        content_id = page_id + 1
+        content_stream = _build_pdf_content_stream(chunk)
+        objects[page_id] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+        ).encode("ascii")
+        objects[content_id] = (
+            f"<< /Length {len(content_stream)} >>\nstream\n".encode("ascii")
+            + content_stream
+            + b"\nendstream"
+        )
+
+    buffer = io.BytesIO()
+    buffer.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    total_objects = max(objects)
+
+    for object_id in range(1, total_objects + 1):
+        offsets.append(buffer.tell())
+        buffer.write(f"{object_id} 0 obj\n".encode("ascii"))
+        buffer.write(objects[object_id])
+        buffer.write(b"\nendobj\n")
+
+    xref_offset = buffer.tell()
+    buffer.write(f"xref\n0 {total_objects + 1}\n".encode("ascii"))
+    buffer.write(b"0000000000 65535 f \n")
+    for object_id in range(1, total_objects + 1):
+        buffer.write(f"{offsets[object_id]:010d} 00000 n \n".encode("ascii"))
+
+    buffer.write(
+        f"trailer\n<< /Size {total_objects + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode("ascii")
+    )
+    return buffer.getvalue()
+
+
 class PaymentReportExportView(AuthenticatedAPIView):
     def get(self, request):
         if request.user.role != User.Role.LANDLORD:
@@ -862,6 +1254,7 @@ class PaymentReportExportView(AuthenticatedAPIView):
 
         from_month = request.query_params.get("from", "")
         to_month = request.query_params.get("to", "")
+        fmt = request.query_params.get("file_format", request.query_params.get("export_format", "excel")).lower()
 
         qs = Payment.objects.filter(landlord=request.user).select_related(
             "tenancy__tenant_user", "unit__building", "bank_account",
@@ -872,35 +1265,29 @@ class PaymentReportExportView(AuthenticatedAPIView):
         if to_month:
             qs = qs.filter(rent_month__lte=to_month)
 
-        fmt = request.query_params.get("format", "csv")
+        rows = _payment_report_rows(qs)
+
         if fmt == "json":
-            return Response(PaymentSerializer(qs, many=True).data)
+            return Response(rows)
+        if fmt == "excel":
+            response = HttpResponse(
+                _build_excel_payment_report(rows),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            response["Content-Disposition"] = f'attachment; filename="rentflo_payments_{date.today()}.xlsx"'
+            return response
+        if fmt == "pdf":
+            response = HttpResponse(
+                _build_pdf_payment_report(rows, from_month=from_month, to_month=to_month),
+                content_type="application/pdf",
+            )
+            response["Content-Disposition"] = f'attachment; filename="rentflo_payments_{date.today()}.pdf"'
+            return response
 
-        # CSV export
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([
-            "Tenant", "Building", "Unit", "Month", "Amount", "Paid On",
-            "Bank", "Account", "Status", "Reference", "Provider Payment ID",
-        ])
-        for p in qs:
-            writer.writerow([
-                p.tenancy.tenant_user.get_full_name(),
-                p.unit.building.name,
-                p.unit.label,
-                p.rent_month,
-                str(p.amount),
-                str(p.paid_on),
-                p.bank_account.bank_name,
-                p.bank_account.account_number,
-                p.status,
-                p.reference,
-                p.provider_payment_id,
-            ])
-
-        response = HttpResponse(output.getvalue(), content_type="text/csv")
-        response["Content-Disposition"] = f'attachment; filename="rentflo_payments_{date.today()}.csv"'
-        return response
+        return Response(
+            {"detail": "Unsupported export format. Choose excel or pdf."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 # ============================================================================

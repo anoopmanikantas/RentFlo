@@ -1,12 +1,10 @@
 import json
 import os
+import re
 import uuid
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-
-from django.conf import settings
 
 
 # ---------------------------------------------------------------------------
@@ -14,6 +12,88 @@ from django.conf import settings
 # ---------------------------------------------------------------------------
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY") or os.environ.get("EXPO_PUBLIC_FIREBASE_API_KEY", "")
+FIREBASE_LANDLORD_AUTH_ENABLED = os.environ.get("FIREBASE_LANDLORD_AUTH_ENABLED", "false").lower() == "true"
+
+
+def normalize_phone(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    keep_plus = raw.startswith("+")
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
+    return f"+{digits}" if keep_plus or len(digits) > 10 else digits
+
+
+def find_user_by_phone(phone: str):
+    from .models import User
+
+    normalized = normalize_phone(phone)
+    if not normalized:
+        return None
+    for user in User.objects.exclude(phone=""):
+        if normalize_phone(user.phone) == normalized:
+            return user
+    return None
+
+
+class FirebaseAuthError(Exception):
+    pass
+
+
+def is_firebase_landlord_auth_enabled() -> bool:
+    return FIREBASE_LANDLORD_AUTH_ENABLED
+
+
+def verify_firebase_id_token(id_token: str) -> dict:
+    if not FIREBASE_LANDLORD_AUTH_ENABLED:
+        raise FirebaseAuthError("Firebase landlord auth is disabled.")
+
+    if not FIREBASE_API_KEY:
+        raise FirebaseAuthError("Firebase auth is not configured on the server.")
+
+    payload = json.dumps({"idToken": id_token}).encode("utf-8")
+    request = Request(
+        f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={FIREBASE_API_KEY}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = "Firebase token verification failed."
+        try:
+            error_body = json.loads(exc.read().decode("utf-8"))
+        except ValueError:
+            error_body = {}
+        message = error_body.get("error", {}).get("message")
+        if message:
+            detail = f"Firebase token verification failed: {message}"
+        raise FirebaseAuthError(detail) from exc
+    except URLError as exc:
+        raise FirebaseAuthError(f"Firebase token verification failed: {exc}") from exc
+
+    users = body.get("users") or []
+    if not users:
+        raise FirebaseAuthError("Firebase token verification failed.")
+
+    user = users[0]
+    email = (user.get("email") or "").strip().lower()
+    if not email:
+        raise FirebaseAuthError("Firebase account did not include an email address.")
+
+    return {
+        "uid": user.get("localId", ""),
+        "email": email,
+        "display_name": (user.get("displayName") or "").strip(),
+        "phone": normalize_phone(user.get("phoneNumber", "")),
+        "email_verified": bool(user.get("emailVerified")),
+    }
 
 
 def verify_google_id_token(id_token: str) -> dict:

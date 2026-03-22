@@ -1,5 +1,6 @@
 import string
 import random
+from typing import Optional
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
@@ -22,6 +23,7 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=Role.choices)
     phone = models.CharField(max_length=32, blank=True)
     tenant_code = models.CharField(max_length=10, unique=True, blank=True, null=True)
+    firebase_uid = models.CharField(max_length=128, unique=True, blank=True, null=True)
 
     def save(self, *args, **kwargs):
         if not self.tenant_code:
@@ -73,7 +75,7 @@ class Subscription(TimestampedModel):
     def __str__(self):
         return f"{self.landlord} – {self.get_tier_display()}"
 
-    def apply_tier_limits(self, tier: str | None = None):
+    def apply_tier_limits(self, tier: Optional[str] = None):
         """Set max_units/max_tenants from TIER_LIMITS for the given (or current) tier."""
         tier = tier or self.tier
         limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
