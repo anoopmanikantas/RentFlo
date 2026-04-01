@@ -20,11 +20,13 @@ from .views import (
     EndTenancyView,
     FirebaseLandlordAuthView,
     GoogleLoginView,
+    HRARentReceiptView,
     InitiateOffboardingView,
     InitiateTenantPaymentView,
     LandlordDashboardView,
     LoginView,
     MaintenanceIntelligenceView,
+    MaintenanceRecordListCreateView,
     MeView,
     OffboardingDetailView,
     OnboardingStatusView,
@@ -96,4 +98,8 @@ urlpatterns = [
     path("tenant/dashboard/", TenantDashboardView.as_view(), name="api-tenant-dashboard"),
     path("tenant/payments/initiate/", InitiateTenantPaymentView.as_view(), name="api-tenant-payment-initiate"),
     path("tenant/payments/confirm/", ConfirmTenantPaymentView.as_view(), name="api-tenant-payment-confirm"),
+    # Maintenance records
+    path("landlord/maintenance/", MaintenanceRecordListCreateView.as_view(), name="api-maintenance-records"),
+    # HRA rent receipt
+    path("tenant/hra-receipt/", HRARentReceiptView.as_view(), name="api-hra-receipt"),
 ]

@@ -549,6 +549,15 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
             if resolved_status == RazorpayOrder.Status.SUCCEEDED
             else Payment.Status.FAILED
         )
+
+        # Prevent duplicate succeeded payments for same rent month
+        if final_payment_status == Payment.Status.SUCCEEDED:
+            existing = Payment.objects.filter(
+                tenancy=tenancy, rent_month=order.rent_month, status=Payment.Status.SUCCEEDED,
+            ).exclude(razorpay_order=order).first()
+            if existing:
+                return Response({"detail": "Payment already recorded for this month.", "status": "succeeded"})
+
         payment = Payment.objects.filter(razorpay_order=order, tenancy=tenancy).first()
         if payment:
             payment.status = final_payment_status
@@ -571,6 +580,12 @@ class ConfirmTenantPaymentView(AuthenticatedAPIView):
                 provider_payload=provider_payload or {},
                 razorpay_order=order,
             )
+
+        # Auto-complete onboarding after first successful rent payment
+        if final_payment_status == Payment.Status.SUCCEEDED:
+            if tenancy.onboarding_status == Tenancy.OnboardingStatus.PENDING_FIRST_RENT:
+                tenancy.onboarding_status = Tenancy.OnboardingStatus.COMPLETED
+                tenancy.save(update_fields=["onboarding_status", "updated_at"])
 
         return Response({"detail": "Payment status updated.", "status": final_payment_status})
 
@@ -761,7 +776,7 @@ class UpgradeSubscriptionView(AuthenticatedAPIView):
         target_tier = serializer.validated_data["tier"]
 
         sub = _ensure_subscription(request.user)
-        tier_order = {"free": 0, "pro": 1, "business": 2}
+        tier_order = {"free": 0, "starter": 1, "pro": 2, "business": 3}
         if tier_order.get(target_tier, 0) <= tier_order.get(sub.tier, 0):
             return Response(
                 {"detail": f"You are already on {sub.get_tier_display()} or higher."},
@@ -799,14 +814,27 @@ class ConfirmUpgradeView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         target_tier = request.data.get("tier")
-        if target_tier not in ("pro", "business"):
+        if target_tier not in ("starter", "pro", "business"):
             return Response({"detail": "Invalid tier."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # In mock mode we trust the client; in live mode you'd verify the
-        # Razorpay signature here (same pattern as ConfirmTenantPaymentView).
+        # Verify Razorpay payment signature when in live mode
+        razorpay_order_id = request.data.get("razorpay_order_id", "")
+        razorpay_payment_id = request.data.get("razorpay_subscription_id", "") or request.data.get("razorpay_payment_id", "")
+        razorpay_signature = request.data.get("razorpay_signature", "")
+
+        client = RazorpayClient()
+        if client.configured and razorpay_order_id and razorpay_payment_id and razorpay_signature:
+            sig_valid = client.verify_payment_signature(
+                razorpay_order_id=razorpay_order_id,
+                razorpay_payment_id=razorpay_payment_id,
+                razorpay_signature=razorpay_signature,
+            )
+            if not sig_valid:
+                return Response({"detail": "Payment signature verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+
         sub = _ensure_subscription(request.user)
         sub.apply_tier_limits(target_tier)
-        sub.razorpay_subscription_id = request.data.get("razorpay_subscription_id", "")
+        sub.razorpay_subscription_id = razorpay_payment_id
         sub.save()
 
         return Response({
@@ -2020,3 +2048,223 @@ class ConfirmMaintenanceDoneView(AuthenticatedAPIView):
             "detail": f"Unit {tenancy.unit.label} is now available for rent.",
             "offboarding": OffboardingSerializer(offboarding).data,
         })
+
+
+# ---------------------------------------------------------------------------
+# Maintenance Record CRUD
+# ---------------------------------------------------------------------------
+
+class MaintenanceRecordListCreateView(AuthenticatedAPIView):
+    """GET list, POST create maintenance records for landlord."""
+
+    def get(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        records = MaintenanceRecord.objects.filter(landlord=request.user).select_related("unit").order_by("-date")
+        data = [
+            {
+                "id": r.id,
+                "unit_id": r.unit_id,
+                "unit_label": r.unit.label,
+                "building_name": r.unit.building.name,
+                "date": str(r.date),
+                "description": r.description,
+                "amount": str(r.amount),
+                "type": r.type,
+            }
+            for r in records
+        ]
+        return Response(data)
+
+    def post(self, request):
+        if request.user.role != User.Role.LANDLORD:
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        unit_id = request.data.get("unit_id")
+        try:
+            unit = Unit.objects.get(id=unit_id, building__landlord=request.user)
+        except Unit.DoesNotExist:
+            return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        record = MaintenanceRecord.objects.create(
+            landlord=request.user,
+            unit=unit,
+            date=request.data.get("date", date.today()),
+            description=request.data.get("description", ""),
+            amount=Decimal(str(request.data.get("amount", "0"))),
+            type=request.data.get("type", MaintenanceRecord.Type.REACTIVE),
+        )
+        return Response({
+            "id": record.id,
+            "unit_id": record.unit_id,
+            "date": str(record.date),
+            "description": record.description,
+            "amount": str(record.amount),
+            "type": record.type,
+        }, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# HRA Rent Receipt PDF Generation
+# ---------------------------------------------------------------------------
+
+class HRARentReceiptView(AuthenticatedAPIView):
+    """Generate HRA rent receipt PDF for tenant's tax claims."""
+
+    def get(self, request):
+        tenancy = (
+            Tenancy.objects.filter(tenant_user=request.user, is_active=True)
+            .select_related("landlord", "unit", "unit__building")
+            .first()
+        )
+        if not tenancy:
+            return Response({"detail": "No active tenancy."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get financial year from query params or default to current
+        fy_start_year = request.query_params.get("fy_start")
+        if fy_start_year:
+            fy_start_year = int(fy_start_year)
+        else:
+            today = date.today()
+            fy_start_year = today.year if today.month >= 4 else today.year - 1
+
+        fy_start = f"{fy_start_year}-04"
+        fy_end = f"{fy_start_year + 1}-03"
+
+        payments = Payment.objects.filter(
+            tenancy=tenancy,
+            status=Payment.Status.SUCCEEDED,
+            rent_month__gte=fy_start,
+            rent_month__lte=fy_end,
+        ).order_by("rent_month")
+
+        total_paid = sum(p.amount for p in payments)
+
+        # Build receipt data
+        receipt_rows = []
+        for p in payments:
+            receipt_rows.append({
+                "month": p.rent_month,
+                "amount": str(p.amount),
+                "paid_on": str(p.paid_on) if p.paid_on else "",
+                "reference": p.provider_payment_id or p.reference or "",
+            })
+
+        landlord = tenancy.landlord
+        tenant = request.user
+
+        receipt_data = {
+            "title": "Rent Receipt for HRA Claim",
+            "financial_year": f"FY {fy_start_year}-{str(fy_start_year + 1)[-2:]}",
+            "tenant_name": tenant.get_full_name() or tenant.username,
+            "tenant_pan": "",  # To be filled from documents if available
+            "landlord_name": landlord.get_full_name() or landlord.username,
+            "landlord_pan": "",  # Landlord PAN for receipts > 1L/year
+            "property_address": f"{tenancy.unit.building.name}, {tenancy.unit.label}",
+            "building_address": tenancy.unit.building.address,
+            "monthly_rent": str(tenancy.unit.monthly_rent),
+            "total_rent_paid": str(total_paid),
+            "period": f"April {fy_start_year} - March {fy_start_year + 1}",
+            "payments": receipt_rows,
+            "receipt_count": len(receipt_rows),
+        }
+
+        # Try to get tenant's PAN from documents
+        try:
+            pan_doc = tenancy.documents.filter(doc_type="pan", verified=True).first()
+            if pan_doc:
+                receipt_data["tenant_pan"] = pan_doc.doc_number
+        except Exception:
+            pass
+
+        format_param = request.query_params.get("format", "json")
+        if format_param == "json":
+            return Response(receipt_data)
+
+        # Generate PDF
+        from io import BytesIO
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import mm
+            from reportlab.pdfgen import canvas as pdf_canvas
+        except ImportError:
+            return Response({"detail": "PDF generation requires reportlab."}, status=502)
+
+        buf = BytesIO()
+        c = pdf_canvas.Canvas(buf, pagesize=A4)
+        w, h = A4
+
+        # Header
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(40, h - 50, "Rent Receipt")
+        c.setFont("Helvetica", 11)
+        c.drawString(40, h - 70, receipt_data["financial_year"])
+        c.drawString(40, h - 85, f"Generated by RentFlow")
+
+        # Tenant & Landlord details
+        y = h - 120
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "Tenant:")
+        c.setFont("Helvetica", 11)
+        c.drawString(110, y, receipt_data["tenant_name"])
+        if receipt_data["tenant_pan"]:
+            c.drawString(110, y - 15, f"PAN: {receipt_data['tenant_pan']}")
+            y -= 15
+
+        y -= 25
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "Landlord:")
+        c.setFont("Helvetica", 11)
+        c.drawString(110, y, receipt_data["landlord_name"])
+
+        y -= 25
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "Property:")
+        c.setFont("Helvetica", 11)
+        c.drawString(110, y, receipt_data["property_address"])
+        if receipt_data["building_address"]:
+            y -= 15
+            c.drawString(110, y, receipt_data["building_address"])
+
+        # Payment table
+        y -= 40
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(40, y, "Month")
+        c.drawString(180, y, "Amount (INR)")
+        c.drawString(320, y, "Paid On")
+        c.drawString(440, y, "Reference")
+
+        y -= 5
+        c.line(40, y, w - 40, y)
+
+        c.setFont("Helvetica", 10)
+        for row in receipt_rows:
+            y -= 18
+            if y < 80:
+                c.showPage()
+                y = h - 50
+                c.setFont("Helvetica", 10)
+            c.drawString(40, y, row["month"])
+            c.drawString(180, y, f"Rs. {row['amount']}")
+            c.drawString(320, y, row["paid_on"])
+            c.drawString(440, y, row["reference"][:20])
+
+        # Total
+        y -= 25
+        c.line(40, y + 10, w - 40, y + 10)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, f"Total Rent Paid: Rs. {receipt_data['total_rent_paid']}")
+
+        # Footer
+        y -= 40
+        c.setFont("Helvetica", 9)
+        c.drawString(40, y, "This is a computer-generated receipt and does not require a signature.")
+        c.drawString(40, y - 12, f"Period: {receipt_data['period']} | Monthly Rent: Rs. {receipt_data['monthly_rent']}")
+
+        c.save()
+        buf.seek(0)
+
+        from django.http import HttpResponse
+        filename = f"HRA_Receipt_{fy_start_year}_{fy_start_year + 1}_{tenant.username}.pdf"
+        response = HttpResponse(buf.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

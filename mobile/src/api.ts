@@ -692,3 +692,80 @@ export function confirmMaintenanceDone(token: string, tenancyId: number) {
     token,
   );
 }
+
+// ---------------------------------------------------------------------------
+// HRA Rent Receipt
+// ---------------------------------------------------------------------------
+
+export type HRAReceiptData = {
+  title: string;
+  financial_year: string;
+  tenant_name: string;
+  tenant_pan: string;
+  landlord_name: string;
+  landlord_pan: string;
+  property_address: string;
+  building_address: string;
+  monthly_rent: string;
+  total_rent_paid: string;
+  period: string;
+  payments: Array<{ month: string; amount: string; paid_on: string; reference: string }>;
+  receipt_count: number;
+};
+
+export function fetchHRAReceipt(token: string, fyStart?: number) {
+  const params = fyStart ? `?fy_start=${fyStart}` : "";
+  return request<HRAReceiptData>(`/tenant/hra-receipt/${params}`, undefined, token);
+}
+
+export function downloadHRAReceiptPDF(token: string, fyStart?: number) {
+  const params = fyStart ? `?format=pdf&fy_start=${fyStart}` : "?format=pdf";
+  const url = `${API_BASE_URL}${"/tenant/hra-receipt/"}${params}`;
+  if (typeof window !== "undefined") {
+    const a = document.createElement("a");
+    a.href = url;
+    a.setAttribute("download", "");
+    // Use fetch with auth header for authenticated download
+    fetch(url, { headers: { Authorization: `Token ${token}` } })
+      .then((res) => res.blob())
+      .then((blob) => {
+        const blobUrl = URL.createObjectURL(blob);
+        a.href = blobUrl;
+        a.download = `HRA_Receipt.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+      });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance Records
+// ---------------------------------------------------------------------------
+
+export type MaintenanceRecordItem = {
+  id: number;
+  unit_id: number;
+  unit_label: string;
+  building_name: string;
+  date: string;
+  description: string;
+  amount: string;
+  type: string;
+};
+
+export function fetchMaintenanceRecords(token: string) {
+  return request<MaintenanceRecordItem[]>("/landlord/maintenance/", undefined, token);
+}
+
+export function createMaintenanceRecord(
+  token: string,
+  data: { unit_id: number; date?: string; description: string; amount: string; type?: string },
+) {
+  return request<MaintenanceRecordItem>(
+    "/landlord/maintenance/",
+    { method: "POST", body: JSON.stringify(data) },
+    token,
+  );
+}

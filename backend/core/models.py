@@ -47,9 +47,10 @@ class TimestampedModel(models.Model):
 # ---------------------------------------------------------------------------
 
 TIER_LIMITS = {
-    "free":     {"max_units": 5,   "max_tenants": 5,   "price_monthly": 0,    "features": []},
-    "pro":      {"max_units": 25,  "max_tenants": 25,  "price_monthly": 499,  "features": ["analytics"]},
-    "business": {"max_units": 9999, "max_tenants": 9999, "price_monthly": 1499, "features": ["analytics", "reports_export"]},
+    "free":     {"max_units": 3,   "max_tenants": 3,   "price_monthly": 0,    "features": []},
+    "starter":  {"max_units": 10,  "max_tenants": 10,  "price_monthly": 199,  "features": []},
+    "pro":      {"max_units": 50,  "max_tenants": 50,  "price_monthly": 499,  "features": ["analytics", "hra_export"]},
+    "business": {"max_units": 9999, "max_tenants": 9999, "price_monthly": 1499, "features": ["analytics", "hra_export", "reports_export"]},
 }
 
 ADDON_CATALOG = {
@@ -61,13 +62,14 @@ ADDON_CATALOG = {
 class Subscription(TimestampedModel):
     class Tier(models.TextChoices):
         FREE = "free", "Free"
+        STARTER = "starter", "Starter"
         PRO = "pro", "Pro"
         BUSINESS = "business", "Business"
 
     landlord = models.OneToOneField(User, on_delete=models.CASCADE, related_name="subscription")
     tier = models.CharField(max_length=20, choices=Tier.choices, default=Tier.FREE)
-    max_units = models.PositiveIntegerField(default=5)
-    max_tenants = models.PositiveIntegerField(default=5)
+    max_units = models.PositiveIntegerField(default=3)
+    max_tenants = models.PositiveIntegerField(default=3)
     razorpay_subscription_id = models.CharField(max_length=120, blank=True)
     valid_until = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)

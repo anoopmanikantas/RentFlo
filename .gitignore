@@ -22,3 +22,5 @@ backend/staticfiles/
 *.swo
 
 run.sh
+
+/stitch
